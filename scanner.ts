@@ -46,6 +46,7 @@ const ICP_LEDGER_IDL = ({ IDL }: { IDL: typeof import("@dfinity/candid").IDL }) 
     to: AccountIdentifier,
     amount: Tokens,
     fee: Tokens,
+    spender: IDL.Opt(IDL.Vec(IDL.Nat8)),
   });
 
   const Mint = IDL.Record({
@@ -55,18 +56,31 @@ const ICP_LEDGER_IDL = ({ IDL }: { IDL: typeof import("@dfinity/candid").IDL }) 
 
   const Burn = IDL.Record({
     from: AccountIdentifier,
+    spender: IDL.Opt(AccountIdentifier),
     amount: Tokens,
+  });
+
+  const Approve = IDL.Record({
+    from: AccountIdentifier,
+    spender: AccountIdentifier,
+    allowance_e8s: IDL.Int,
+    allowance: Tokens,
+    fee: Tokens,
+    expires_at: IDL.Opt(TimeStamp),
+    expected_allowance: IDL.Opt(Tokens),
   });
 
   const Operation = IDL.Variant({
     Transfer: Transfer,
     Mint: Mint,
     Burn: Burn,
+    Approve: Approve,
   });
 
   const Transaction = IDL.Record({
-    operation: Operation,
     memo: Memo,
+    icrc1_memo: IDL.Opt(IDL.Vec(IDL.Nat8)),
+    operation: IDL.Opt(Operation),
     created_at_time: TimeStamp,
   });
 
@@ -340,7 +354,7 @@ async function scanIcpLedger(canisterId: string, icpAccountIdHex: string): Promi
     const ledgerActor = actor as unknown as {
       query_blocks: (args: { start: bigint; length: bigint }) => Promise<{ chain_length: bigint }>;
     };
-    const res = await ledgerActor.query_blocks({ start: 0n, length: 1n });
+    const res = await ledgerActor.query_blocks({ start: 0n, length: 0n });
     chainLength = res.chain_length;
   } catch (e) {
     console.error(`  Failed to get chain length:`, e);
@@ -382,10 +396,12 @@ async function scanIcpLedger(canisterId: string, icpAccountIdHex: string): Promi
           operation?: Record<string, unknown>;
           memo?: unknown;
         };
-        if (!tx.operation) continue;
-        const opKey = Object.keys(tx.operation)[0];
+        const opVal = (tx as any).operation;
+        const optInner = Array.isArray(opVal) ? opVal[0] : opVal;
+        if (!optInner) continue;
+        const opKey = Object.keys(optInner)[0];
         if (!opKey) continue;
-        const op = tx.operation[opKey] as {
+        const op = (optInner as any)[opKey] as {
           from?: number[];
           to?: number[];
           amount?: { e8s?: bigint };
@@ -442,6 +458,7 @@ async function scanIcpLedger(canisterId: string, icpAccountIdHex: string): Promi
             to: AccountIdentifier,
             amount: Tokens,
             fee: Tokens,
+            spender: IDL.Opt(IDL.Vec(IDL.Nat8)),
           });
 
           const Mint = IDL.Record({
@@ -451,18 +468,31 @@ async function scanIcpLedger(canisterId: string, icpAccountIdHex: string): Promi
 
           const Burn = IDL.Record({
             from: AccountIdentifier,
+            spender: IDL.Opt(AccountIdentifier),
             amount: Tokens,
+          });
+
+          const Approve = IDL.Record({
+            from: AccountIdentifier,
+            spender: AccountIdentifier,
+            allowance_e8s: IDL.Int,
+            allowance: Tokens,
+            fee: Tokens,
+            expires_at: IDL.Opt(TimeStamp),
+            expected_allowance: IDL.Opt(Tokens),
           });
 
           const Operation = IDL.Variant({
             Transfer: Transfer,
             Mint: Mint,
             Burn: Burn,
+            Approve: Approve,
           });
 
           const Transaction = IDL.Record({
-            operation: Operation,
             memo: Memo,
+            icrc1_memo: IDL.Opt(IDL.Vec(IDL.Nat8)),
+            operation: IDL.Opt(Operation),
             created_at_time: TimeStamp,
           });
 
@@ -515,10 +545,13 @@ async function scanIcpLedger(canisterId: string, icpAccountIdHex: string): Promi
             operation?: Record<string, unknown>;
             memo?: unknown;
           };
-          const opKey = tx?.operation && Object.keys(tx.operation)[0];
+          const opVal = (tx as any).operation;
+          const optInner = Array.isArray(opVal) ? opVal[0] : opVal;
+          if (!optInner) continue;
+          const opKey = Object.keys(optInner)[0];
           if (opKey !== "Transfer") continue;
 
-          const op = (tx.operation as any)[opKey] as {
+          const op = (optInner as any)[opKey] as {
             from?: number[];
             to?: number[];
             amount?: { e8s?: bigint };
@@ -591,6 +624,7 @@ async function scanIcrcLedger(
 
     console.log(`  Scanning blocks ${scanStart} to ${endIndex}...`);
 
+    let pages = 0;
     for (let cursor = endIndex; cursor >= scanStart && totalScanned < MAX_BLOCKS_PER_LEDGER; ) {
       const length = BigInt(Math.min(PAGE, Number(cursor - scanStart + 1n)));
       const start = cursor - (length - 1n);
@@ -601,6 +635,12 @@ async function scanIcrcLedger(
         ) => Promise<{ blocks?: unknown[]; archived_blocks?: unknown[] }>;
       };
       const res = await icrc3Actor.icrc3_get_blocks([{ start, length }]);
+      pages++;
+      if (pages % 50 === 0) {
+        const done = (endIndex - cursor + 1n).toString();
+        const total = (endIndex - scanStart + 1n).toString();
+        console.log(`  ...progress: ~${done}/${total} blocks (${pages} pages)`);
+      }
       const blocks = res.blocks || [];
       const archived = res.archived_blocks || [];
 
