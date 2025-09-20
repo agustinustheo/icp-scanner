@@ -76,12 +76,11 @@ const VERIFY_CKUSDC_INDEX = BigInt(envNum("VERIFY_CKUSDC_INDEX", 408_821, 0));
 const VERIFY_ICP_INDEX = BigInt(envNum("VERIFY_ICP_INDEX", 25_906_544, 0));
 
 // ---------- Endpoints ----------
-const LEDGER_API_V1 = "https://ledger-api.internetcomputer.org/api/v1"; // ICP
-const ICRC_API_V1 = "https://icrc-api.internetcomputer.org/api/v1"; // ICRC
-const ICRC_API_V2 = "https://icrc-api.internetcomputer.org/api/v2"; // ICRC v2
-// Rosetta fallbacks:
-const ICP_ROSETTA = "https://icp-rosetta.internetcomputer.org"; // reverse proxy may differ; override if needed
-const ICRC_ROSETTA = "https://icrc-rosetta.internetcomputer.org"; // ditto
+const LEDGER_API_V1 = "https://ledger-api.internetcomputer.org/api/v1"; // ICP (Dashboard)
+const ICRC_API_V1 = "https://icrc-api.internetcomputer.org/api/v1"; // ICRC (Dashboard v1)
+// Optional Rosetta (only if you run one)
+const ICP_ROSETTA = envStr("ICP_ROSETTA_URL", ""); // e.g. http://127.0.0.1:8081
+const ICRC_ROSETTA = envStr("ICRC_ROSETTA_URL", ""); // e.g. http://127.0.0.1:8082
 
 // ---------- CSV ----------
 type Direction = "inflow" | "outflow" | "self" | "mint" | "burn";
@@ -152,37 +151,11 @@ async function getJson<T>(url: string, params?: Record<string, string | number |
       .join("&");
   const full = qp ? `${url}?${qp}` : url;
   const res = await fetch(full);
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${full}`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`${res.status} ${res.statusText} for ${full}\n${body.slice(0, 256)}`);
+  }
   return (await res.json()) as T;
-}
-
-// ---------- ICRC API (v2: resolve account id then list tx) ----------
-type IcrcAccount = {
-  id: string; // <-- internal account id
-  owner: string;
-  subaccount?: string | null; // 64-hex or empty
-};
-
-// Resolve the internal account id from owner/subaccount (STRICT_SUB respected)
-async function resolveIcrcAccountId(
-  ledger: string,
-  owner: string,
-  subHex?: string
-): Promise<string | null> {
-  // v2 search supports query by owner/subaccount
-  // If STRICT_SUB==0, omit subaccount to match default (zero-32) + all subs of owner
-  const params: Record<string, string> = { owner };
-  if (STRICT_SUB && subHex && !/^0+$/.test(subHex)) params.subaccount = subHex.toLowerCase();
-
-  // v2: GET /api/v2/ledgers/{ledger}/accounts?owner=...&subaccount=...
-  const url = `${ICRC_API_V2}/ledgers/${ledger}/accounts`;
-  const page = await getJson<{ data: IcrcAccount[]; next_offset?: number | null }>(url, params);
-  if (!page?.data?.length) return null;
-
-  // If STRICT_SUB==0 and you get multiple accounts, pick the one with empty/zero sub first.
-  const zero = (s?: string | null) => !s || /^0+$/i.test(s);
-  const best = page.data.find((a) => zero(a.subaccount)) || page.data[0];
-  return best?.id ?? null;
 }
 
 // ---------- ICP Ledger API (account tx history) ----------
@@ -198,18 +171,19 @@ type IcpTx = {
 type IcpTxPage = { data: IcpTx[]; next_offset?: number | null };
 async function fetchIcpTxByAccountHex(
   accountHex: string,
-  fromISO: string,
-  toISO: string,
+  _fromISO: string,
+  _toISO: string,
   pageSize: number
 ): Promise<IcpTx[]> {
   const out: IcpTx[] = [];
   let offset = 0;
 
   for (;;) {
-    // Call *without* from/to to avoid 404s caused by parameter schema mismatches,
-    // then filter locally (same result, robust to param changes).
-    const url = `${LEDGER_API_V1}/accounts/${accountHex}/transactions`;
-    const page = await getJson<IcpTxPage>(url, { limit: pageSize, offset });
+    // DO NOT pass from/to; 404s are common if params don't match server schema.
+    const page = await getJson<IcpTxPage>(`${LEDGER_API_V1}/accounts/${accountHex}/transactions`, {
+      limit: pageSize,
+      offset,
+    });
 
     const inWindow = (t: IcpTx) => {
       const ms = Date.parse(t.timestamp);
@@ -244,21 +218,21 @@ async function fetchIcrcTxByAccount(
   ledger: string,
   owner: string,
   subHex: string | undefined,
-  fromISO: string,
-  toISO: string,
+  _fromISO: string,
+  _toISO: string,
   pageSize: number
 ): Promise<IcrcTx[]> {
-  const id = await resolveIcrcAccountId(ledger, owner, subHex);
-  if (!id) return [];
+  // Use v1 composite account key: {owner}:{subaccountHex (64 zeros for default)}
+  const zero = "0".repeat(64);
+  const sub = STRICT_SUB && subHex && !/^0+$/i.test(subHex) ? subHex.toLowerCase() : zero;
+  const acct = `${owner}:${sub}`;
 
   const out: IcrcTx[] = [];
   let offset = 0;
 
   for (;;) {
-    // v2: GET /api/v2/ledgers/{ledger}/accounts/{id}/transactions
-    // NOTE: to avoid 422s on date parsing variations, page server-side
-    // and filter client-side by timestamp.
-    const url = `${ICRC_API_V2}/ledgers/${ledger}/accounts/${id}/transactions`;
+    // v1 is stable and accepts the composite key; omit date params; filter locally
+    const url = `${ICRC_API_V1}/ledgers/${ledger}/accounts/${encodeURIComponent(acct)}/transactions`;
     const page = await getJson<IcrcTxPage>(url, { limit: pageSize, offset });
 
     // client-side date filter preserves your behavior
@@ -287,20 +261,7 @@ type IcrcBlock = {
 };
 async function getIcrcBlockByIndex(ledger: string, index: bigint): Promise<IcrcBlock | null> {
   const idx = index.toString();
-
-  // Try v2 first
-  try {
-    const r = await getJson<any>(`${ICRC_API_V2}/ledgers/${ledger}/blocks/${idx}`);
-    return {
-      id: String(r?.id ?? idx),
-      timestamp: String(r?.timestamp ?? r?.ts ?? ""),
-      tx: r?.tx ?? r?.transaction ?? undefined,
-    };
-  } catch {
-    // v2 API not available, try v1
-  }
-
-  // Then v1
+  // Dashboard ICRC v1 block detail
   try {
     const r = await getJson<any>(`${ICRC_API_V1}/ledgers/${ledger}/blocks/${idx}`);
     return {
@@ -309,13 +270,14 @@ async function getIcrcBlockByIndex(ledger: string, index: bigint): Promise<IcrcB
       tx: r?.tx ?? r?.transaction ?? undefined,
     };
   } catch {
-    // v1 API not available, try Rosetta
+    // v1 not available -> Rosetta only if provided
+    if (!ICRC_ROSETTA) return null;
   }
 
   // Rosetta fallback unchanged…
   try {
     const body = {
-      network_identifier: { blockchain: "IC", network: ledger },
+      network_identifier: { blockchain: "Internet Computer", network: ledger },
       block_identifier: { index: Number(index) },
     };
     const res = await fetch(`${ICRC_ROSETTA}/block`, {
@@ -388,10 +350,11 @@ async function getIcpBlockByIndex(index: bigint): Promise<IcpBlock | null> {
       memo_hex: r?.memo_hex ?? "",
     };
   } catch {
-    // Fallback: ICP Rosetta /block
+    // Fallback: ICP Rosetta /block only if provided
+    if (!ICP_ROSETTA) return null;
     try {
       const body = {
-        network_identifier: { blockchain: "IC", network: "00000000000000020101" }, // mainnet id used by ICP Rosetta
+        network_identifier: { blockchain: "Internet Computer", network: "00000000000000020101" },
         block_identifier: { index: Number(index) },
       };
       const res = await fetch(`${ICP_ROSETTA}/block`, {
@@ -506,7 +469,7 @@ async function sanityCheck_ckBTC(index: bigint, walletSubHex?: string) {
   console.log(`\n[Sanity] ckBTC @ ${ledger} index=${index}`);
   const blk = await getIcrcBlockByIndex(ledger || "", index);
   if (!blk || !blk.tx) {
-    console.log("  -> Not found via Dashboard ICRC API nor Rosetta.");
+    console.log("  -> Not found via Dashboard ICRC API; Rosetta not configured or also failed.");
     return;
   }
   const t = blk.tx;
@@ -532,7 +495,7 @@ async function sanityCheck_ckUSDC(index: bigint, walletSubHex?: string) {
   console.log(`\n[Sanity] ckUSDC @ ${ledger} index=${index}`);
   const blk = await getIcrcBlockByIndex(ledger || "", index);
   if (!blk || !blk.tx) {
-    console.log("  -> Not found via Dashboard ICRC API nor Rosetta.");
+    console.log("  -> Not found via Dashboard ICRC API; Rosetta not configured or also failed.");
     return;
   }
   const t = blk.tx;
@@ -557,7 +520,7 @@ async function sanityCheck_ICP(index: bigint) {
   console.log(`\n[Sanity] ICP @ ${LEDGERS.ICP} index=${index}`);
   const blk = await getIcpBlockByIndex(index);
   if (!blk) {
-    console.log("  -> Not found via Ledger API nor ICP Rosetta.");
+    console.log("  -> Not found via Ledger API; Rosetta not configured or also failed.");
     return;
   }
   const op = (blk.op || "").toLowerCase();
