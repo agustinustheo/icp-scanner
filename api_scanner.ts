@@ -142,6 +142,7 @@ function toISO(x: any) {
 }
 
 // ---------- Fetch helpers ----------
+
 async function getJson<T>(url: string, params?: Record<string, string | number | undefined>) {
   const qp =
     params &&
@@ -160,43 +161,42 @@ async function getJson<T>(url: string, params?: Record<string, string | number |
 
 // ---------- ICP Ledger API (account tx history) ----------
 type IcpTx = {
-  index: string;
-  timestamp: string; // ISO
-  operation: string; // Transfer|Mint|Burn|Approve...
-  from_account_identifier?: string; // hex
-  to_account_identifier?: string; // hex
-  amount_e8s?: string;
-  memo_hex?: string;
+  block_height: string;
+  block_hash: string;
+  transaction_hash: string;
+  transfer_type: "transfer" | "mint" | "burn" | "approve";
+  amount: string;
+  fee?: string;
+  from_account_identifier?: string;
+  to_account_identifier?: string;
+  created_at: number; // epoch seconds
+  memo?: string;
 };
-type IcpTxPage = { data: IcpTx[]; next_offset?: number | null };
 async function fetchIcpTxByAccountHex(
   accountHex: string,
-  _fromISO: string,
-  _toISO: string,
+  fromISO: string,
+  toISO: string,
   pageSize: number
 ): Promise<IcpTx[]> {
+  const limit = Math.min(100, Math.max(1, pageSize));
+  const start = Math.floor(new Date(fromISO).getTime() / 1000);
+  const end = Math.floor(new Date(toISO).getTime() / 1000);
+
   const out: IcpTx[] = [];
-  let offset = 0;
+  let after: string | undefined = undefined;
 
   for (;;) {
-    // DO NOT pass from/to; 404s are common if params don't match server schema.
-    const page = await getJson<IcpTxPage>(`${LEDGER_API_V1}/accounts/${accountHex}/transactions`, {
-      limit: pageSize,
-      offset,
+    const url = `${LEDGER_API_V1.replace("/api/v1", "/api/v2")}/accounts/${accountHex}/transactions`;
+    const page: { data: IcpTx[]; next_cursor?: string } = await getJson(url, {
+      sort_by: "-block_height",
+      limit,
+      created_at_start: start,
+      created_at_end: end,
+      ...(after ? { after } : {}),
     });
-
-    const inWindow = (t: IcpTx) => {
-      const ms = Date.parse(t.timestamp);
-      return Number.isFinite(ms) && ms >= START_DATE.getTime() && ms <= END_DATE.getTime();
-    };
-    (page.data || []).forEach((t) => {
-      if (inWindow(t)) out.push(t);
-    });
-
-    const got = (page.data || []).length;
-    if (!page.next_offset && got < pageSize) break;
-    offset = page.next_offset ?? offset + pageSize;
-    if (got === 0) break;
+    out.push(...(page.data || []));
+    if (!page.next_cursor || (page.data || []).length < limit) break;
+    after = page.next_cursor;
   }
   return out;
 }
@@ -206,49 +206,45 @@ type IcrcTx = {
   id: string;
   timestamp: string; // ISO
   op: string; // transfer/approve...
-  from?: { owner: string; subaccount?: string };
-  to?: { owner: string; subaccount?: string };
+  from?: { owner: string; subaccount?: string } | undefined;
+  to?: { owner: string; subaccount?: string } | undefined;
   amount?: string; // base units
-  symbol?: string;
-  decimals?: number;
+  symbol?: string | undefined;
+  decimals?: number | undefined;
   memo_hex?: string;
 };
-type IcrcTxPage = { data: IcrcTx[]; next_offset?: number | null };
 async function fetchIcrcTxByAccount(
   ledger: string,
   owner: string,
   subHex: string | undefined,
-  _fromISO: string,
-  _toISO: string,
+  fromISO: string,
+  toISO: string,
   pageSize: number
 ): Promise<IcrcTx[]> {
-  // Use v1 composite account key: {owner}:{subaccountHex (64 zeros for default)}
   const zero = "0".repeat(64);
   const sub = STRICT_SUB && subHex && !/^0+$/i.test(subHex) ? subHex.toLowerCase() : zero;
-  const acct = `${owner}:${sub}`;
+  const id = `${owner}:${sub}`;
+  const limit = Math.min(100, Math.max(1, pageSize));
+
+  const start = Math.floor(new Date(fromISO).getTime() / 1000);
+  const end = Math.floor(new Date(toISO).getTime() / 1000);
 
   const out: IcrcTx[] = [];
-  let offset = 0;
+  let after: string | undefined = undefined;
 
   for (;;) {
-    // v1 is stable and accepts the composite key; omit date params; filter locally
-    const url = `${ICRC_API_V1}/ledgers/${ledger}/accounts/${encodeURIComponent(acct)}/transactions`;
-    const page = await getJson<IcrcTxPage>(url, { limit: pageSize, offset });
-
-    // client-side date filter preserves your behavior
-    const inWindow = (t: IcrcTx) => {
-      const ms = Date.parse(t.timestamp);
-      return Number.isFinite(ms) && ms >= START_DATE.getTime() && ms <= END_DATE.getTime();
-    };
-
-    (page.data || []).forEach((t) => {
-      if (inWindow(t)) out.push(t);
+    const url = `${ICRC_API_V1.replace("/api/v1", "/api/v2")}/ledgers/${ledger}/accounts/${encodeURIComponent(id)}/transactions`;
+    const page: { data: IcrcTx[]; next_cursor?: string } = await getJson(url, {
+      limit,
+      sort_by: "-index",
+      start,
+      end,
+      ...(after ? { after } : {}),
     });
 
-    const got = (page.data || []).length;
-    if (!page.next_offset && got < pageSize) break;
-    offset = page.next_offset ?? offset + pageSize;
-    if (got === 0) break;
+    out.push(...(page.data || []));
+    if (!page.next_cursor || (page.data || []).length < limit) break;
+    after = page.next_cursor;
   }
   return out;
 }
@@ -261,16 +257,30 @@ type IcrcBlock = {
 };
 async function getIcrcBlockByIndex(ledger: string, index: bigint): Promise<IcrcBlock | null> {
   const idx = index.toString();
-  // Dashboard ICRC v1 block detail
   try {
-    const r = await getJson<any>(`${ICRC_API_V1}/ledgers/${ledger}/blocks/${idx}`);
+    const r = await getJson<any>(`${ICRC_API_V1}/ledgers/${ledger}/transactions/${idx}`);
+    // r is a Transaction (v1), fields include: index, kind, amount, from_owner, to_owner, memo, timestamp, ...
     return {
-      id: String(r?.id ?? idx),
-      timestamp: String(r?.timestamp ?? r?.ts ?? ""),
-      tx: r?.tx ?? r?.transaction ?? undefined,
+      id: r?.index?.toString() ?? idx,
+      timestamp: r?.timestamp ?? "",
+      tx: {
+        id: r?.index?.toString() ?? idx,
+        timestamp: r?.timestamp ?? "",
+        op: String(r?.kind ?? "").toLowerCase(),
+        from: r?.from_owner
+          ? { owner: r.from_owner, ...(r.from_subaccount ? { subaccount: r.from_subaccount } : {}) }
+          : undefined,
+        to: r?.to_owner
+          ? { owner: r.to_owner, ...(r.to_subaccount ? { subaccount: r.to_subaccount } : {}) }
+          : undefined,
+        amount: r?.amount ?? "0",
+        symbol: undefined,
+        decimals: undefined,
+        memo_hex: r?.memo ?? "",
+      },
     };
   } catch {
-    // v1 not available -> Rosetta only if provided
+    // keep your Rosetta fallback if configured
     if (!ICRC_ROSETTA) return null;
   }
 
@@ -337,51 +347,37 @@ type IcpBlock = {
   memo_hex?: string;
 };
 async function getIcpBlockByIndex(index: bigint): Promise<IcpBlock | null> {
-  // Try (if available) a ledger API block detail route
+  // ICP block by index only available via Rosetta
+  if (!ICP_ROSETTA) return null;
   try {
-    const r = await getJson<any>(`${LEDGER_API_V1}/blocks/${index.toString()}`);
+    const body = {
+      network_identifier: { blockchain: "Internet Computer", network: "00000000000000020101" },
+      block_identifier: { index: Number(index) },
+    };
+    const res = await fetch(`${ICP_ROSETTA}/block`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(String(res.status));
+    const j = await res.json();
+    const tsMs = Number(j?.block?.timestamp ?? 0) / 1_000_000;
+    const tx = j?.block?.transactions?.[0];
+    const ops = tx?.operations ?? [];
+    // Heuristic mapping for a Transfer op
+    const op = ops.find((o: any) => /transfer/i.test(o?.type || "")) || ops[0] || {};
+    const meta = op?.metadata || {};
     return {
-      index: String(r?.index ?? index.toString()),
-      timestamp: String(r?.timestamp ?? ""),
-      op: r?.operation ?? r?.op ?? "",
-      from_hex: r?.from_account_identifier ?? "",
-      to_hex: r?.to_account_identifier ?? "",
-      amount_e8s: r?.amount_e8s ?? "0",
-      memo_hex: r?.memo_hex ?? "",
+      index: String(index),
+      timestamp: toISO(tsMs),
+      op: String(op?.type || "Transfer"),
+      from_hex: meta?.from_account_identifier || meta?.from || "",
+      to_hex: meta?.to_account_identifier || meta?.to || "",
+      amount_e8s: meta?.amount_e8s || meta?.amount || "0",
+      memo_hex: meta?.memo_hex || "",
     };
   } catch {
-    // Fallback: ICP Rosetta /block only if provided
-    if (!ICP_ROSETTA) return null;
-    try {
-      const body = {
-        network_identifier: { blockchain: "Internet Computer", network: "00000000000000020101" },
-        block_identifier: { index: Number(index) },
-      };
-      const res = await fetch(`${ICP_ROSETTA}/block`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) throw new Error(String(res.status));
-      const j = await res.json();
-      const tsMs = Number(j?.block?.timestamp ?? 0) / 1_000_000;
-      const tx = j?.block?.transactions?.[0];
-      const ops = tx?.operations ?? [];
-      // Heuristic mapping for a Transfer op
-      const op = ops.find((o: any) => /transfer/i.test(o?.type || "")) || ops[0] || {};
-      const meta = op?.metadata || {};
-      return {
-        index: String(index),
-        timestamp: toISO(tsMs),
-        op: String(op?.type || "Transfer"),
-        from_hex: meta?.from_account_identifier || meta?.from || "",
-        to_hex: meta?.to_account_identifier || meta?.to || "",
-        amount_e8s: meta?.amount_e8s || meta?.amount || "0",
-        memo_hex: meta?.memo_hex || "",
-      };
-    } catch {
-      return null;
-    }
+    return null;
   }
 }
 
@@ -409,7 +405,7 @@ function matchesIcrcAccount(
 function mapIcpTxToCsv(t: IcpTx): CsvRow | null {
   const token = "ICP";
   const decimals = 8;
-  const op = (t.operation || "").toLowerCase();
+  const op = (t.transfer_type || "").toLowerCase();
 
   let direction: Direction | null = null;
   if (op === "mint") direction = "mint";
@@ -424,14 +420,14 @@ function mapIcpTxToCsv(t: IcpTx): CsvRow | null {
   if (!direction) return null;
 
   return {
-    date_iso: toISO(t.timestamp),
+    date_iso: toISO((t.created_at ?? 0) * 1000),
     token,
     direction,
-    amount: formatAmount(String(t.amount_e8s ?? "0"), decimals),
+    amount: formatAmount(String(t.amount ?? "0"), decimals),
     from_principal: (t.from_account_identifier || "").toLowerCase(),
     to_principal: (t.to_account_identifier || "").toLowerCase(),
-    block_index: String(t.index),
-    memo: (t.memo_hex || "").toLowerCase(),
+    block_index: String(t.block_height),
+    memo: (t.memo || "").toLowerCase(),
   };
 }
 function mapIcrcTxToCsv(t: IcrcTx): CsvRow | null {
