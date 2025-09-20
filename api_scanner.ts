@@ -76,7 +76,8 @@ const VERIFY_CKUSDC_INDEX = BigInt(envNum("VERIFY_CKUSDC_INDEX", 408_821, 0));
 const VERIFY_ICP_INDEX = BigInt(envNum("VERIFY_ICP_INDEX", 25_906_544, 0));
 
 // ---------- Endpoints ----------
-const LEDGER_API_V1 = "https://ledger-api.internetcomputer.org/api/v1"; // ICP (Dashboard)
+// const LEDGER_API_V1 = "https://ledger-api.internetcomputer.org/api/v1"; // ICP (Dashboard) - deprecated
+const LEDGER_API_BASE = "https://ledger-api.internetcomputer.org"; // no /api prefix
 const ICRC_API_V1 = "https://icrc-api.internetcomputer.org/api/v1"; // ICRC (Dashboard v1)
 // Optional Rosetta (only if you run one)
 const ICP_ROSETTA = envStr("ICP_ROSETTA_URL", ""); // e.g. http://127.0.0.1:8081
@@ -186,7 +187,7 @@ async function fetchIcpTxByAccountHex(
   let after: string | undefined = undefined;
 
   for (;;) {
-    const url = `${LEDGER_API_V1.replace("/api/v1", "/api/v2")}/accounts/${accountHex}/transactions`;
+    const url = `${LEDGER_API_BASE}/v2/accounts/${accountHex}/transactions`;
     const page: { data: IcpTx[]; next_cursor?: string } = await getJson(url, {
       sort_by: "-block_height",
       limit,
@@ -216,33 +217,55 @@ type IcrcTx = {
 async function fetchIcrcTxByAccount(
   ledger: string,
   owner: string,
-  subHex: string | undefined,
+  _subHex: string | undefined,
   fromISO: string,
   toISO: string,
   pageSize: number
 ): Promise<IcrcTx[]> {
-  const zero = "0".repeat(64);
-  const sub = STRICT_SUB && subHex && !/^0+$/i.test(subHex) ? subHex.toLowerCase() : zero;
-  const id = `${owner}:${sub}`;
   const limit = Math.min(100, Math.max(1, pageSize));
-
   const start = Math.floor(new Date(fromISO).getTime() / 1000);
   const end = Math.floor(new Date(toISO).getTime() / 1000);
 
   const out: IcrcTx[] = [];
-  let after: string | undefined = undefined;
+  let after: string | undefined;
 
   for (;;) {
-    const url = `${ICRC_API_V1.replace("/api/v1", "/api/v2")}/ledgers/${ledger}/accounts/${encodeURIComponent(id)}/transactions`;
-    const page: { data: IcrcTx[]; next_cursor?: string } = await getJson(url, {
+    const url = `${ICRC_API_V1.replace("/api/v1", "/api/v2")}/ledgers/${ledger}/transactions`;
+    const page: { data: any[]; next_cursor?: string } = await getJson(url, {
       limit,
       sort_by: "-index",
       start,
       end,
+      query: owner,
+      include_kind: "transfer",
       ...(after ? { after } : {}),
     });
 
-    out.push(...(page.data || []));
+    // Map the indexer's v2 'Transaction' objects into your IcrcTx shape
+    for (const r of page.data || []) {
+      out.push({
+        id: String(r?.index ?? ""),
+        timestamp: r?.timestamp ?? "",
+        op: String(r?.kind ?? "").toLowerCase(),
+        from: r?.from_owner
+          ? {
+              owner: r.from_owner,
+              ...(r.from_subaccount ? { subaccount: r.from_subaccount } : {}),
+            }
+          : undefined,
+        to: r?.to_owner
+          ? {
+              owner: r.to_owner,
+              ...(r.to_subaccount ? { subaccount: r.to_subaccount } : {}),
+            }
+          : undefined,
+        amount: r?.amount ?? "0",
+        symbol: r?.symbol,
+        decimals: r?.decimals,
+        memo_hex: r?.memo ?? "",
+      });
+    }
+
     if (!page.next_cursor || (page.data || []).length < limit) break;
     after = page.next_cursor;
   }
@@ -399,6 +422,15 @@ function matchesIcrcAccount(
   if (acct.owner !== walletOwner) return false;
   if (!STRICT_SUB) return true;
   return eqSub(acct.subaccount, walletSubHex);
+}
+
+function passesStrictSub(t: IcrcTx, walletSubHex?: string): boolean {
+  if (!STRICT_SUB || !walletSubHex) return true;
+  const norm = (x?: string) => (x || "").replace(/^0x/, "").toLowerCase().replace(/^0+$/, "");
+  const w = norm(walletSubHex);
+  const fromOk = t.from?.owner === WALLET_PRINCIPAL && norm(t.from?.subaccount) === w;
+  const toOk = t.to?.owner === WALLET_PRINCIPAL && norm(t.to?.subaccount) === w;
+  return fromOk || toOk;
 }
 
 // ---------- Mapping → CSV (ICP + ICRC) ----------
@@ -602,6 +634,7 @@ async function main() {
         );
         let n = 0;
         for (const t of txs) {
+          if (!passesStrictSub(t, WALLET_SUB_HEX || undefined)) continue;
           const row = mapIcrcTxToCsv(t);
           if (row) {
             appendRow(OUT_CSV, row);
