@@ -10,16 +10,18 @@ A unified TypeScript scanner for tracking ICP blockchain transactions across mul
 ## Features
 
 - Unified scanner for both ICP native ledger and ICRC-3 tokens
-- Scans historical transactions with archive support
+- Scans historical transactions with full archive support
 - Tracks inflows, outflows, self-transfers, mints, and burns
 - Exports all transactions to a single CSV file
-- Configurable date cutoff (default: June 2025)
+- Progress tracking during long scans
+- Configurable date cutoff (default: no cutoff)
 - Supports both principal and legacy account ID matching
+- Safe environment variable handling with sensible defaults
 
 ## Prerequisites
 
 - Node.js (v16 or higher)
-- pnpm or npm
+- pnpm (or npm/yarn)
 
 ## Installation
 
@@ -29,38 +31,91 @@ pnpm install
 
 ## Configuration
 
-The scanner uses environment variables for configuration:
+All environment variables have safe defaults, so you can run the scanner without any configuration. However, you can customize behavior with these variables:
 
-- `WALLET_PRINCIPAL`: Your ICP wallet principal (default provided)
-- `CKBTC_LEDGER`: ckBTC ledger canister ID
-- `CKUSDC_LEDGER`: ckUSDC ledger canister ID
-- `CKUSDT_LEDGER`: ckUSDT ledger canister ID
-- `MAX_BLOCKS_PER_LEDGER`: Maximum blocks to scan per ledger (default: 1000)
-- `IC_HOST`: IC network host (default: https://ic0.app)
-- `OUT_CSV`: Output CSV filename (default: icrc3_flows.csv)
+### Required for Your Wallet
+
+- `WALLET_PRINCIPAL`: Your ICP wallet principal (default: example principal)
+- `ICP_ACCOUNT_ID_HEX`: Your ICP account ID in hex format (default: example account)
+
+### Ledger Canister IDs (defaults to mainnet canisters)
+
+- `ICP_LEDGER`: ICP ledger canister ID (default: `ryjl3-tyaaa-aaaaa-aaaba-cai`)
+- `CKBTC_LEDGER`: ckBTC ledger canister ID (default: `mxzaz-hqaaa-aaaar-qaada-cai`)
+- `CKUSDC_LEDGER`: ckUSDC ledger canister ID (default: `xevnm-gaaaa-aaaar-qafnq-cai`)
+- `CKUSDT_LEDGER`: ckUSDT ledger canister ID (default: `cngnf-vqaaa-aaaar-qag4q-cai`)
+
+### Scanning Parameters
+
+- `CUTOFF_DATE`: Only scan transactions before this date (default: `2030-12-31T23:59:59Z` - effectively no cutoff)
+- `MAX_BLOCKS_PER_LEDGER`: Maximum blocks to scan per ledger (default: `1000000`)
+- `PAGE`: Page size for block fetching (default: `1000`)
+- `PROGRESS_EVERY`: Show progress every N pages (default: `50`)
+
+### Output
+
+- `IC_HOST`: IC network host (default: `https://ic0.app`)
+- `OUT_CSV`: Output CSV filename (default: `flows.csv`)
 
 ## Usage
 
-### Test Run
-
-Run a quick test with 50 blocks:
+### Quick Start (with your wallet)
 
 ```bash
-./test-scanner.sh
+# Replace with your actual wallet principal and account ID
+WALLET_PRINCIPAL="your-principal-here" \
+ICP_ACCOUNT_ID_HEX="your-account-id-hex" \
+pnpm start
 ```
 
-### Full Scan
-
-Run with custom parameters:
+### Build and Run
 
 ```bash
-MAX_BLOCKS_PER_LEDGER=5000 WALLET_PRINCIPAL=your-principal node dist/scan_transactions.js
+# Build the TypeScript
+pnpm build
+
+# Run with default settings
+pnpm start
+
+# Or run the compiled JS directly
+node dist/scanner.js
 ```
 
-### Compile Only
+### Example: Scan Only Recent Transactions
 
 ```bash
-pnpm tsc scan_transactions.ts --noEmit false --outDir dist --target ES2020 --module commonjs
+# Scan only last 10,000 blocks per ledger with June 2025 cutoff
+CUTOFF_DATE="2025-06-30T23:59:59Z" \
+MAX_BLOCKS_PER_LEDGER=10000 \
+WALLET_PRINCIPAL="your-principal" \
+ICP_ACCOUNT_ID_HEX="your-account-id" \
+pnpm start
+```
+
+### Example: Verbose Progress Output
+
+```bash
+# Show progress every 10 pages instead of every 50
+PROGRESS_EVERY=10 \
+WALLET_PRINCIPAL="your-principal" \
+ICP_ACCOUNT_ID_HEX="your-account-id" \
+pnpm start
+```
+
+### Development Commands
+
+```bash
+# Run linting
+pnpm lint
+
+# Format code
+pnpm format
+
+# Build without running
+pnpm build
+
+# Run all checks (lint, format, build)
+pnpm check
 ```
 
 ## Output

@@ -7,31 +7,58 @@ import { HttpAgent, Actor } from "@dfinity/agent";
 import { Principal } from "@dfinity/principal";
 import * as fs from "fs";
 
-// ---------- CONFIG ----------
-const WALLET_PRINCIPAL =
-  process.env.WALLET_PRINCIPAL ?? "ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe";
+// Small helpers so bad or empty envs fall back safely
+function envStr(name: string, def: string): string {
+  const v = process.env[name];
+  return v && v.trim().length ? v.trim() : def;
+}
+function envNum(name: string, def: number, min?: number): number {
+  const raw = process.env[name];
+  const n = raw !== undefined ? Number(raw) : NaN;
+  if (!Number.isFinite(n)) return def;
+  if (min !== undefined && n < min) return def;
+  return n;
+}
+function envDate(name: string, defISO: string): Date {
+  const raw = process.env[name];
+  if (!raw) return new Date(defISO);
+  const d = new Date(raw);
+  return Number.isFinite(d.getTime()) ? d : new Date(defISO);
+}
+function envHex(name: string, def: string): string {
+  const raw = process.env[name];
+  const s = (raw ?? def).toLowerCase().replace(/^0x/, "");
+  return /^[0-9a-f]*$/.test(s) ? s : def.toLowerCase();
+}
 
-const ICP_ACCOUNT_ID_HEX = (
-  process.env.ICP_ACCOUNT_ID_HEX ??
+const WALLET_PRINCIPAL = envStr(
+  "WALLET_PRINCIPAL",
+  "ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe"
+);
+
+const ICP_ACCOUNT_ID_HEX = envHex(
+  "ICP_ACCOUNT_ID_HEX",
   "e71fb5d09ec4082185c469d95ea1628e1fd5a6b3302cc7ed001df577995e9297"
-).toLowerCase();
+);
 
 const LEDGERS: Record<string, string> = {
-  ICP: process.env.ICP_LEDGER ?? "ryjl3-tyaaa-aaaaa-aaaba-cai",
-  ckBTC: process.env.CKBTC_LEDGER ?? "mxzaz-hqaaa-aaaar-qaada-cai",
-  ckUSDC: process.env.CKUSDC_LEDGER ?? "xevnm-gaaaa-aaaar-qafnq-cai",
-  ckUSDT: process.env.CKUSDT_LEDGER ?? "cngnf-vqaaa-aaaar-qag4q-cai",
+  ICP: envStr("ICP_LEDGER", "ryjl3-tyaaa-aaaaa-aaaba-cai"),
+  ckBTC: envStr("CKBTC_LEDGER", "mxzaz-hqaaa-aaaar-qaada-cai"),
+  ckUSDC: envStr("CKUSDC_LEDGER", "xevnm-gaaaa-aaaar-qafnq-cai"),
+  ckUSDT: envStr("CKUSDT_LEDGER", "cngnf-vqaaa-aaaar-qag4q-cai"),
 };
 
-// Optional cutoff date - set to far future by default (no cutoff)
-const CUTOFF_DATE_STR = process.env.CUTOFF_DATE ?? "2030-12-31T23:59:59Z";
-const CUTOFF_DATE = new Date(CUTOFF_DATE_STR);
+// Optional cutoff date (no cutoff by default)
+const CUTOFF_DATE = envDate("CUTOFF_DATE", "2030-12-31T23:59:59Z");
 const CUTOFF_TIMESTAMP = BigInt(CUTOFF_DATE.getTime()) * 1_000_000n;
 
-const MAX_BLOCKS_PER_LEDGER = Number(process.env.MAX_BLOCKS_PER_LEDGER ?? 1_000_000);
-const PAGE = 1000;
-const HOST = process.env.IC_HOST ?? "https://ic0.app";
-const OUT_CSV = process.env.OUT_CSV ?? "flows.csv";
+// Tuning knobs
+const MAX_BLOCKS_PER_LEDGER = envNum("MAX_BLOCKS_PER_LEDGER", 1_000_000, 1);
+const PAGE = envNum("PAGE", 1000, 1);
+const PROGRESS_EVERY = envNum("PROGRESS_EVERY", 50, 1);
+
+const HOST = envStr("IC_HOST", "https://ic0.app");
+const OUT_CSV = envStr("OUT_CSV", "flows.csv");
 
 // ---------- ICP Ledger IDL (query_blocks) ----------
 const ICP_LEDGER_IDL = ({ IDL }: { IDL: typeof import("@dfinity/candid").IDL }) => {
@@ -366,6 +393,8 @@ async function scanIcpLedger(canisterId: string, icpAccountIdHex: string): Promi
     endIndex > BigInt(MAX_BLOCKS_PER_LEDGER) ? endIndex - BigInt(MAX_BLOCKS_PER_LEDGER) : 0n;
 
   console.log(`  Scanning blocks ${startIndex} to ${endIndex}...`);
+  const totalToScan = endIndex - startIndex + 1n;
+  let pages = 0;
 
   for (let cursor = endIndex; cursor >= startIndex && scanned < MAX_BLOCKS_PER_LEDGER; ) {
     const length = BigInt(Math.min(PAGE, Number(cursor - startIndex + 1n)));
@@ -380,6 +409,10 @@ async function scanIcpLedger(canisterId: string, icpAccountIdHex: string): Promi
         }>;
       };
       const res = await ledgerActor.query_blocks({ start, length });
+      pages++;
+      if (pages % PROGRESS_EVERY === 0) {
+        console.log(`  ...progress: ~${scanned}/${totalToScan} blocks (${pages} pages)`);
+      }
       const blocks = res.blocks || [];
 
       for (let i = 0; i < blocks.length; i++) {
@@ -530,6 +563,11 @@ async function scanIcpLedger(canisterId: string, icpAccountIdHex: string): Promi
           start: range.start,
           length: range.length,
         });
+        // count each archive fetch as a "page" for progress purposes
+        pages++;
+        if (pages % PROGRESS_EVERY === 0) {
+          console.log(`  ...progress: ~${scanned}/${totalToScan} blocks (${pages} pages)`);
+        }
 
         const ok = (r && (r.Ok || r.ok)) as { blocks: any[] } | undefined;
         if (!ok) continue;
@@ -636,10 +674,9 @@ async function scanIcrcLedger(
       };
       const res = await icrc3Actor.icrc3_get_blocks([{ start, length }]);
       pages++;
-      if (pages % 50 === 0) {
-        const done = (endIndex - cursor + 1n).toString();
-        const total = (endIndex - scanStart + 1n).toString();
-        console.log(`  ...progress: ~${done}/${total} blocks (${pages} pages)`);
+      if (pages % PROGRESS_EVERY === 0) {
+        const total = endIndex - scanStart + 1n;
+        console.log(`  ...progress: ~${totalScanned}/${total} blocks (${pages} pages)`);
       }
       const blocks = res.blocks || [];
       const archived = res.archived_blocks || [];
