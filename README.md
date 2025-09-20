@@ -14,7 +14,7 @@ A unified TypeScript scanner for tracking ICP blockchain transactions across mul
 - Tracks inflows, outflows, self-transfers, mints, and burns
 - Exports all transactions to a single CSV file
 - Progress tracking during long scans
-- Configurable date cutoff (default: no cutoff)
+- Configurable date window for filtering transactions (default: June 1, 2025 to now)
 - Supports both principal and legacy account ID matching
 - Safe environment variable handling with sensible defaults
 
@@ -47,7 +47,8 @@ All environment variables have safe defaults, so you can run the scanner without
 
 ### Scanning Parameters
 
-- `CUTOFF_DATE`: Only scan transactions before this date (default: `2030-12-31T23:59:59Z` - effectively no cutoff)
+- `START_DATE`: Start of time window to scan (default: `2025-06-01T00:00:00Z`)
+- `END_DATE`: End of time window to scan (default: current time)
 - `MAX_BLOCKS_PER_LEDGER`: Maximum blocks to scan per ledger (default: `1000000`)
 - `PAGE`: Page size for block fetching (default: `1000`)
 - `PROGRESS_EVERY`: Show progress every N pages (default: `50`)
@@ -81,11 +82,22 @@ pnpm start
 node dist/scanner.js
 ```
 
-### Example: Scan Only Recent Transactions
+### Example: Scan Specific Date Range
 
 ```bash
-# Scan only last 10,000 blocks per ledger with June 2025 cutoff
-CUTOFF_DATE="2025-06-30T23:59:59Z" \
+# Scan transactions between June 1 and September 30, 2025
+START_DATE="2025-06-01T00:00:00Z" \
+END_DATE="2025-09-30T23:59:59Z" \
+WALLET_PRINCIPAL="your-principal" \
+ICP_ACCOUNT_ID_HEX="your-account-id" \
+pnpm start
+```
+
+### Example: Scan Recent Transactions Only
+
+```bash
+# Scan only last 10,000 blocks from June 2025 to now
+START_DATE="2025-06-01T00:00:00Z" \
 MAX_BLOCKS_PER_LEDGER=10000 \
 WALLET_PRINCIPAL="your-principal" \
 ICP_ACCOUNT_ID_HEX="your-account-id" \

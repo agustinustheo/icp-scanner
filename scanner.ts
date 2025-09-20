@@ -48,9 +48,15 @@ const LEDGERS: Record<string, string> = {
   ckUSDT: envStr("CKUSDT_LEDGER", "cngnf-vqaaa-aaaar-qag4q-cai"),
 };
 
-// Optional cutoff date (no cutoff by default)
-const CUTOFF_DATE = envDate("CUTOFF_DATE", "2030-12-31T23:59:59Z");
-const CUTOFF_TIMESTAMP = BigInt(CUTOFF_DATE.getTime()) * 1_000_000n;
+// Time window (inclusive). Defaults to START=2025-06-01T00:00:00Z and END=now.
+const START_DATE = envDate("START_DATE", "2025-06-01T00:00:00Z");
+const END_DATE = envDate("END_DATE", new Date().toISOString());
+// If the user swapped them, normalize:
+const _start = START_DATE.getTime();
+const _end = END_DATE.getTime();
+const [FROM_MS, TO_MS] = _start <= _end ? [_start, _end] : [_end, _start];
+const FROM_TS = BigInt(FROM_MS) * 1_000_000n; // nanoseconds
+const TO_TS = BigInt(TO_MS) * 1_000_000n;
 
 // Tuning knobs
 const MAX_BLOCKS_PER_LEDGER = envNum("MAX_BLOCKS_PER_LEDGER", 1_000_000, 1);
@@ -420,8 +426,8 @@ async function scanIcpLedger(canisterId: string, icpAccountIdHex: string): Promi
         const blockIndex = res.first_block_index + BigInt(i);
         const timestamp = n64ToMillis((block as { timestamp?: unknown }).timestamp);
 
-        // Check cutoff date
-        if (timestamp && timestamp > CUTOFF_DATE.getTime()) continue;
+        // Keep only blocks inside [FROM_MS, TO_MS]
+        if (timestamp && (timestamp < FROM_MS || timestamp > TO_MS)) continue;
 
         const date_iso = timestamp ? new Date(timestamp).toISOString() : "";
 
@@ -576,7 +582,7 @@ async function scanIcpLedger(canisterId: string, icpAccountIdHex: string): Promi
           const block = ok.blocks[i];
           const blockIndex = BigInt(range.start) + BigInt(i); // start+i per spec
           const timestamp = n64ToMillis((block as any).timestamp);
-          if (timestamp && timestamp > CUTOFF_DATE.getTime()) continue;
+          if (timestamp && (timestamp < FROM_MS || timestamp > TO_MS)) continue;
 
           const date_iso = timestamp ? new Date(timestamp).toISOString() : "";
           const tx = (block as any).transaction as {
@@ -704,8 +710,8 @@ async function scanIcrcLedger(
 
         const timestamp = extractNat(extractValue(block, "ts"));
 
-        // Check cutoff date
-        if (timestamp > CUTOFF_TIMESTAMP) continue;
+        // Keep only blocks inside [FROM_TS, TO_TS] (ts is in nanoseconds)
+        if (timestamp < FROM_TS || timestamp > TO_TS) continue;
 
         const date_iso = timestamp ? new Date(Number(timestamp) / 1_000_000).toISOString() : "";
 
@@ -796,8 +802,8 @@ async function scanIcrcLedger(
 
             const timestamp = extractNat(extractValue(block, "ts"));
 
-            // Check cutoff date
-            if (timestamp > CUTOFF_TIMESTAMP) continue;
+            // Keep only blocks inside [FROM_TS, TO_TS] (ts is in nanoseconds)
+            if (timestamp < FROM_TS || timestamp > TO_TS) continue;
 
             const date_iso = timestamp ? new Date(Number(timestamp) / 1_000_000).toISOString() : "";
 
@@ -865,7 +871,9 @@ async function main() {
   console.log(`================================`);
   console.log(`Wallet Principal: ${WALLET_PRINCIPAL}`);
   console.log(`ICP Account ID: ${ICP_ACCOUNT_ID_HEX}`);
-  console.log(`Cutoff Date: ${CUTOFF_DATE.toISOString()}`);
+  console.log(
+    `Date window: ${new Date(FROM_MS).toISOString()} .. ${new Date(TO_MS).toISOString()}`
+  );
   console.log(`Max blocks per ledger: ${MAX_BLOCKS_PER_LEDGER}`);
   console.log(`Debug: Scanner fixed with:`);
   console.log(`  - Map-based account extraction for ICRC-3`);
