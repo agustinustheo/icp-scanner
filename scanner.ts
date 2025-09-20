@@ -59,7 +59,7 @@ const FROM_TS = BigInt(FROM_MS) * 1_000_000n; // nanoseconds
 const TO_TS = BigInt(TO_MS) * 1_000_000n;
 
 // Tuning knobs
-const MAX_BLOCKS_PER_LEDGER = envNum("MAX_BLOCKS_PER_LEDGER", 1_000_000, 1);
+const MAX_BLOCKS_PER_LEDGER = envNum("MAX_BLOCKS_PER_LEDGER", 4_000_000, 1);
 const PAGE = envNum("PAGE", 1000, 1);
 const PROGRESS_EVERY = envNum("PROGRESS_EVERY", 50, 1);
 
