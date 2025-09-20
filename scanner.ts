@@ -1,7 +1,6 @@
-/**
- * ICP Transaction Scanner
- * Parallel, reusable fetchers (start,length) for ICP and ICRC-3 ledgers.
- * Sanity checks and scanners share the same fetch code.
+/**  ICP Transaction Scanner
+ *  Parallel, reusable fetchers (start,length) for ICP and ICRC-3 ledgers.
+ *  Sanity checks and scanners share the same fetch code.
  */
 
 import { HttpAgent, Actor } from "@dfinity/agent";
@@ -202,8 +201,8 @@ type CsvRow = {
   token: string;
   direction: "inflow" | "outflow" | "self" | "mint" | "burn";
   amount: string;
-  from_principal: string;
-  to_principal: string;
+  from_principal: string; // for ICP rows we store account-id hex here
+  to_principal: string; // for ICP rows we store account-id hex here
   block_index: string;
   memo: string;
 };
@@ -336,10 +335,14 @@ function extractValue(value: unknown, key: string): unknown {
 
 function extractText(value: unknown): string {
   if (!value) return "";
-  const v = value as { Text?: string; Nat?: bigint; Int?: bigint };
+  const v = value as {
+    Text?: string;
+    Nat?: bigint | string | number;
+    Int?: bigint | string | number;
+  };
   if (v.Text !== undefined) return v.Text;
-  if (v.Nat !== undefined) return v.Nat.toString();
-  if (v.Int !== undefined) return v.Int.toString();
+  if (v.Nat !== undefined) return String(v.Nat);
+  if (v.Int !== undefined) return String(v.Int);
   return "";
 }
 
@@ -359,7 +362,7 @@ function extractAccount(value: unknown): Account | null {
   if (!value) return null;
 
   // Map form: { owner: Blob, subaccount: opt Blob }
-  const v = value as { Map?: unknown; Array?: unknown };
+  const v = value as { Map?: unknown; Array?: unknown; Text?: string };
   if (v.Map) {
     const ownerVal = extractValue(value, "owner");
     const subVal = extractValue(value, "subaccount");
@@ -465,6 +468,45 @@ function makeIcpActor(agent: HttpAgent, canisterId: string | Principal) {
 }
 function makeIcrc3Actor(agent: HttpAgent, canisterId: string | Principal) {
   return Actor.createActor(ICRC3_IDL as any, { agent, canisterId });
+}
+
+// Dynamic archive actor for ICRC-3 with a specific method name (e.g., "get_blocks" or "icrc3_get_blocks")
+function makeIcrc3ArchiveActor(
+  agent: HttpAgent,
+  canisterId: string | Principal,
+  methodName?: string
+) {
+  const ArchiveIDL = ({ IDL }: { IDL: typeof import("@dfinity/candid").IDL }) => {
+    const Value = IDL.Rec();
+    Value.fill(
+      IDL.Variant({
+        Blob: IDL.Vec(IDL.Nat8),
+        Text: IDL.Text,
+        Nat: IDL.Nat,
+        Int: IDL.Int,
+        Array: IDL.Vec(Value),
+        Map: IDL.Vec(IDL.Tuple(IDL.Text, Value)),
+      })
+    );
+    const GetBlocksArgs = IDL.Vec(IDL.Record({ start: IDL.Nat, length: IDL.Nat }));
+    const GetBlocksResult = IDL.Rec();
+    GetBlocksResult.fill(
+      IDL.Record({
+        log_length: IDL.Nat,
+        blocks: IDL.Vec(IDL.Record({ id: IDL.Nat, block: Value })),
+        archived_blocks: IDL.Vec(
+          IDL.Record({
+            args: GetBlocksArgs,
+            callback: IDL.Func([GetBlocksArgs], [GetBlocksResult], ["query"]),
+          })
+        ),
+      })
+    );
+    return IDL.Service({
+      [methodName || "icrc3_get_blocks"]: IDL.Func([GetBlocksArgs], [GetBlocksResult], ["query"]),
+    });
+  };
+  return Actor.createActor(ArchiveIDL as any, { agent, canisterId });
 }
 
 // ---------------- Reusable fetchers (start, length) ----------------
@@ -597,7 +639,6 @@ async function fetchIcrc3Blocks(
 ): Promise<IcrcFetched[]> {
   const out: IcrcFetched[] = [];
   const res = await actor.icrc3_get_blocks([{ start, length }]);
-
   const blocks = (res?.blocks || []) as Array<{ id: bigint; block: any }>;
   out.push(...blocks);
 
@@ -614,18 +655,31 @@ async function fetchIcrc3Blocks(
 
   await Promise.all(
     archived.flatMap((ai) => {
-      const [cbPrin] = ai.callback ?? [];
-      const archiveActor = makeIcrc3Actor(agent, cbPrin);
+      const [cbPrin, cbMethod] = ai.callback ?? [];
+      const archiveActor = makeIcrc3ArchiveActor(agent, cbPrin, cbMethod);
+      const methodName = (cbMethod || "icrc3_get_blocks") as "icrc3_get_blocks";
       return ai.args.map((argsEntry) =>
         limitArchive(async () => {
-          const r = await (archiveActor as any).icrc3_get_blocks([argsEntry]);
-          const aBlocks = (r?.blocks || []) as Array<{ id: bigint; block: any }>;
-          if (VERBOSE_FETCH) {
-            console.log(
-              `  [fetch-arch][ICRC3] ${argsEntry.start}..${argsEntry.start + argsEntry.length - 1n} blocks=${aBlocks.length}`
-            );
+          try {
+            const r = await (archiveActor as any)[cbMethod || methodName]([argsEntry]);
+            const aBlocks = (r?.blocks || []) as Array<{ id: bigint; block: any }>;
+            if (VERBOSE_FETCH) {
+              console.log(
+                `  [fetch-arch][ICRC3] ${String(argsEntry.start)}..${String(
+                  argsEntry.start + argsEntry.length - 1n
+                )} method=${cbMethod || "icrc3_get_blocks"} blocks=${aBlocks.length}`
+              );
+            }
+            out.push(...aBlocks);
+          } catch (e) {
+            if (VERBOSE_FETCH) {
+              console.warn(
+                `  [fetch-arch][ICRC3] ERROR method=${cbMethod} on ${cbPrin.toText()}:`,
+                e
+              );
+            }
+            // swallow archive errors so the segment can proceed
           }
-          out.push(...aBlocks);
         })
       );
     })
@@ -664,6 +718,11 @@ async function getSymbolAndDecimals(
 }
 
 // ---------------- Parallel scanners (using reusable fetchers) ----------------
+function isIcrcTransferOp(opStr: string): boolean {
+  const s = opStr.toLowerCase();
+  return s === "xfer" || s === "transfer" || s === "1xfer" || s === "icrc1_transfer";
+}
+
 async function scanIcpLedger(canisterId: string, icpAccountIdHex: string): Promise<CsvRow[]> {
   const targetHex = icpAccountIdHex.toLowerCase();
   const agent = new HttpAgent({ host: HOST });
@@ -731,8 +790,9 @@ async function scanIcpLedger(canisterId: string, icpAccountIdHex: string): Promi
         token: symbol,
         direction,
         amount: formatAmount(amount, decimals),
-        from_principal: "",
-        to_principal: "",
+        // fill these with account-id hex so CSV isn't empty
+        from_principal: fromHex,
+        to_principal: toHex,
         block_index: blockIndex.toString(),
         memo,
       };
@@ -829,7 +889,7 @@ async function scanIcrcLedger(
       extractText(extractValue(tx, "op")) ||
       extractText(extractValue(block, "btype")) ||
       extractText(extractValue(block, "type"));
-    if (opType !== "xfer" && opType !== "transfer") return;
+    if (!isIcrcTransferOp(opType)) return;
 
     const from = extractAccount(extractValue(tx, "from"));
     const to = extractAccount(extractValue(tx, "to"));
@@ -896,7 +956,7 @@ async function scanIcrcLedger(
   return rows;
 }
 
-// ---------------- Would-Capture Checkers (unchanged) ----------------
+// ---------------- Would-Capture Checkers ----------------
 function wouldCaptureIcpBlock(
   block: any,
   icpAccountIdHex: string,
@@ -976,7 +1036,7 @@ function wouldCaptureIcrc3Block(
       extractText(extractValue(block, "btype")) ||
       extractText(extractValue(block, "type"));
 
-    if (opType === "xfer" || opType === "transfer") {
+    if (isIcrcTransferOp(opType)) {
       from = extractAccount(extractValue(tx, "from"));
       to = extractAccount(extractValue(tx, "to"));
       amount = extractNat(extractValue(tx, "amt")).toString();
@@ -1011,7 +1071,7 @@ function wouldCaptureIcrc3Block(
   };
 }
 
-// ---------------- Sanity Check Functions (now using reusable fetchers) ----------------
+// ---------------- Sanity Check Functions (using reusable fetchers) ----------------
 async function sanityCheck_ckBTC(index: bigint, wallet: Account) {
   console.log(`\n[Sanity] ckBTC @ ${LEDGERS.ckBTC} index=${index.toString()}`);
   const agent = new HttpAgent({ host: HOST });
