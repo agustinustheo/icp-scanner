@@ -1,14 +1,32 @@
 {
   "name": "icp-flows",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "ICP blockchain transaction scanner for tracking token flows",
+  "main": "dist/scanner.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "tsc",
+    "start": "node dist/scanner.js",
+    "dev": "ts-node scanner.ts",
+    "scan": "./run.sh",
+    "lint": "eslint . --ext .ts",
+    "lint:fix": "eslint . --ext .ts --fix",
+    "format": "prettier --write \"**/*.{ts,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,json,md}\"",
+    "typecheck": "tsc --noEmit"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "icp",
+    "blockchain",
+    "scanner",
+    "crypto",
+    "dfinity"
+  ],
+  "author": "Agustinus Theodorus",
+  "license": "MIT",
   "type": "commonjs",
+  "engines": {
+    "node": ">=16.0.0"
+  },
   "dependencies": {
     "@dfinity/agent": "^3.2.6",
     "@dfinity/candid": "^3.2.6",
@@ -16,8 +34,13 @@
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
+    "@typescript-eslint/eslint-plugin": "^8.19.2",
+    "@typescript-eslint/parser": "^8.19.2",
+    "eslint": "^8.57.1",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-prettier": "^5.2.2",
+    "prettier": "^3.4.2",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.2"
-  },
-  "description": ""
+  }
 }

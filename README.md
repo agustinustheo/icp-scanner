@@ -1,9 +1,10 @@
 # ICP Transaction Scanner
 
 A unified TypeScript scanner for tracking ICP blockchain transactions across multiple assets:
+
 - ICP (native token)
 - ckBTC (chain-key Bitcoin)
-- ckUSDC (chain-key USD Coin)  
+- ckUSDC (chain-key USD Coin)
 - ckUSDT (chain-key Tether)
 
 ## Features
@@ -32,7 +33,7 @@ The scanner uses environment variables for configuration:
 
 - `WALLET_PRINCIPAL`: Your ICP wallet principal (default provided)
 - `CKBTC_LEDGER`: ckBTC ledger canister ID
-- `CKUSDC_LEDGER`: ckUSDC ledger canister ID  
+- `CKUSDC_LEDGER`: ckUSDC ledger canister ID
 - `CKUSDT_LEDGER`: ckUSDT ledger canister ID
 - `MAX_BLOCKS_PER_LEDGER`: Maximum blocks to scan per ledger (default: 1000)
 - `IC_HOST`: IC network host (default: https://ic0.app)
@@ -78,6 +79,7 @@ The scanner generates a CSV file with the following columns:
 ## Technical Details
 
 The scanner implements the ICRC-3 block log standard, which provides:
+
 - Access to historical transaction blocks
 - Support for archived blocks
 - Generic Value type for flexible block data representation
@@ -85,6 +87,7 @@ The scanner implements the ICRC-3 block log standard, which provides:
 ## Scanner Summary
 
 This scanner was created to help track token flows across the ICP ecosystem. It handles the different standards used by various ledgers:
+
 - ICP uses the older `query_blocks` API with account identifiers
 - Chain-key tokens (ckBTC, ckUSDC, ckUSDT) use the ICRC-3 standard
 
