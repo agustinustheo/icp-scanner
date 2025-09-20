@@ -1,1385 +1,1205 @@
-/**  ICP Transaction Scanner
- *  Parallel, reusable fetchers (start,length) for ICP and ICRC-3 ledgers.
- *  Sanity checks and scanners share the same fetch code.
+/**
+ * ICP Transaction Scanner - Unified scanner for ICP and ICRC tokens
+ *
+ * Features:
+ * - Scans ICP via Rosetta API (primary) or Dashboard API (fallback)
+ * - Scans ICRC tokens (ckBTC, ckUSDC, ckUSDT) via ICRC API
+ * - Exports all transactions to CSV format
+ * - Supports date filtering and subaccount matching
+ *
+ * Environment Variables:
+ * - WALLET_PRINCIPAL: Your ICP principal
+ * - ICP_ACCOUNT_ID_HEX: Your ICP account ID (64-hex)
+ * - START_DATE/END_DATE: Date range to scan
+ * - OUT_CSV: Output CSV filename
+ * - PAGE: Page size for fetching (default: 1000)
+ * - STRICT_SUBACCOUNT_MATCH: 0=owner-only, 1=exact subaccount match
  */
 
-import { HttpAgent, Actor } from "@dfinity/agent";
-import { Principal } from "@dfinity/principal";
 import * as fs from "fs";
 
-// ---------------- Env helpers ----------------
-function envStr(name: string, def: string): string {
-  const v = process.env[name];
-  return v && v.trim().length ? v.trim() : def;
-}
-function envNum(name: string, def: number, min?: number): number {
-  const raw = process.env[name];
-  const n = raw !== undefined ? Number(raw) : NaN;
-  if (!Number.isFinite(n)) return def;
-  if (min !== undefined && n < min) return def;
-  return n;
-}
-function envDate(name: string, defISO: string): Date {
-  const raw = process.env[name];
-  if (!raw) return new Date(defISO);
-  const d = new Date(raw);
-  return Number.isFinite(d.getTime()) ? d : new Date(defISO);
-}
-function envHex(name: string, def: string): string {
-  const raw = process.env[name];
-  const s = (raw ?? def).toLowerCase().replace(/^0x/, "");
-  return /^[0-9a-f]*$/.test(s) ? s : def.toLowerCase();
-}
+// ==================== Environment Helpers ====================
 
-// ---------------- Config ----------------
-const WALLET_PRINCIPAL = envStr(
-  "WALLET_PRINCIPAL",
-  "ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe"
-);
-const ICP_ACCOUNT_ID_HEX = envHex(
-  "ICP_ACCOUNT_ID_HEX",
-  "e71fb5d09ec4082185c469d95ea1628e1fd5a6b3302cc7ed001df577995e9297"
-);
+const env = {
+  getString: (name: string, defaultValue: string): string => {
+    const value = process.env[name];
+    return value?.trim() || defaultValue;
+  },
 
-const LEDGERS: Record<string, string> = {
-  ICP: envStr("ICP_LEDGER", "ryjl3-tyaaa-aaaaa-aaaba-cai"),
-  ckBTC: envStr("CKBTC_LEDGER", "mxzaz-hqaaa-aaaar-qaada-cai"),
-  ckUSDC: envStr("CKUSDC_LEDGER", "xevnm-gaaaa-aaaar-qafnq-cai"),
-  ckUSDT: envStr("CKUSDT_LEDGER", "cngnf-vqaaa-aaaar-qag4q-cai"),
+  getNumber: (name: string, defaultValue: number, min?: number): number => {
+    const value = Number(process.env[name]);
+    if (!Number.isFinite(value)) return defaultValue;
+    return min !== undefined && value < min ? defaultValue : value;
+  },
+
+  getDate: (name: string, defaultISO: string): Date => {
+    const value = process.env[name];
+    if (!value) return new Date(defaultISO);
+    const date = new Date(value);
+    return Number.isFinite(date.getTime()) ? date : new Date(defaultISO);
+  },
+
+  getHex: (name: string, defaultValue: string): string => {
+    const value = (process.env[name] ?? defaultValue).toLowerCase().replace(/^0x/, "");
+    return /^[0-9a-f]*$/.test(value) ? value : defaultValue.toLowerCase();
+  },
 };
 
-// Match behavior for ICRC tokens:
-//  - STRICT_SUBACCOUNT_MATCH=1  -> owner+subaccount must match exactly
-//  - STRICT_SUBACCOUNT_MATCH=0  -> match by owner only (captures all your subaccounts)
-const STRICT_SUBACCOUNT_MATCH = envNum("STRICT_SUBACCOUNT_MATCH", 0, 0) > 0;
+// ==================== Configuration ====================
 
-// Time window (inclusive). Defaults to START=2025-06-01T00:00:00Z and END=now.
-const START_DATE = envDate("START_DATE", "2025-06-01T00:00:00Z");
-const END_DATE = envDate("END_DATE", new Date().toISOString());
-const _start = START_DATE.getTime();
-const _end = END_DATE.getTime();
-const [FROM_MS, TO_MS] = _start <= _end ? [_start, _end] : [_end, _start];
-const FROM_TS = BigInt(FROM_MS) * 1_000_000n; // nanoseconds
-const TO_TS = BigInt(TO_MS) * 1_000_000n;
+const config = {
+  // Wallet configuration
+  wallet: {
+    principal: env.getString(
+      "WALLET_PRINCIPAL",
+      "ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe"
+    ),
+    accountIdHex: env.getHex(
+      "ICP_ACCOUNT_ID_HEX",
+      "e71fb5d09ec4082185c469d95ea1628e1fd5a6b3302cc7ed001df577995e9297"
+    ),
+    subaccountHex: env.getHex("WALLET_SUBACCOUNT_HEX", ""),
+  },
 
-// Tuning knobs
-const MAX_BLOCKS_PER_LEDGER = envNum("MAX_BLOCKS_PER_LEDGER", 7_000_000, 1);
-const PAGE = envNum("PAGE", 1000, 1);
-const PROGRESS_EVERY = envNum("PROGRESS_EVERY", 50, 1);
+  // Ledger canister IDs
+  ledgers: {
+    ICP: env.getString("ICP_LEDGER", "ryjl3-tyaaa-aaaaa-aaaba-cai"),
+    ckBTC: env.getString("CKBTC_LEDGER", "mxzaz-hqaaa-aaaar-qaada-cai"),
+    ckUSDC: env.getString("CKUSDC_LEDGER", "xevnm-gaaaa-aaaar-qafnq-cai"),
+    ckUSDT: env.getString("CKUSDT_LEDGER", "cngnf-vqaaa-aaaar-qag4q-cai"),
+  },
 
-// Parallelism
-const CONCURRENCY = envNum("CONCURRENCY", 6, 1);
-const ARCHIVE_CONCURRENCY = envNum("ARCHIVE_CONCURRENCY", CONCURRENCY, 1);
-const VERBOSE_FETCH = envNum("VERBOSE_FETCH", 0, 0) > 0;
+  // Scanning parameters
+  scanning: {
+    startDate: env.getDate("START_DATE", "2025-06-01T00:00:00Z"),
+    endDate: env.getDate("END_DATE", new Date().toISOString()),
+    pageSize: env.getNumber("PAGE", 1000, 1),
+    strictSubaccountMatch: env.getNumber("STRICT_SUBACCOUNT_MATCH", 0) > 0,
+  },
 
-const HOST = envStr("IC_HOST", "https://ic0.app");
-const OUT_CSV = envStr("OUT_CSV", "flows.csv");
+  // Output configuration
+  output: {
+    csvPath: env.getString("OUT_CSV", "flows.csv"),
+  },
 
-// Optional subaccount for ICRC ledgers
-const WALLET_SUBACCOUNT_HEX = envHex("WALLET_SUBACCOUNT_HEX", "");
-
-// Sanity check indices (defaults from known transactions)
-const VERIFY_CKBTC_INDEX = BigInt(envNum("VERIFY_CKBTC_INDEX", 2_783_712, 0));
-const VERIFY_CKUSDC_INDEX = BigInt(envNum("VERIFY_CKUSDC_INDEX", 408_821, 0));
-const VERIFY_ICP_INDEX = BigInt(envNum("VERIFY_ICP_INDEX", 25_906_544, 0));
-
-// ---------------- ICP Ledger IDL (query_blocks) ----------------
-const ICP_LEDGER_IDL = ({ IDL }: { IDL: typeof import("@dfinity/candid").IDL }) => {
-  const AccountIdentifier = IDL.Vec(IDL.Nat8);
-  const Tokens = IDL.Record({ e8s: IDL.Nat64 });
-  const Memo = IDL.Nat64;
-  const TimeStamp = IDL.Record({ timestamp_nanos: IDL.Nat64 });
-  const BlockIndex = IDL.Nat64;
-
-  const Transfer = IDL.Record({
-    from: AccountIdentifier,
-    to: AccountIdentifier,
-    amount: Tokens,
-    fee: Tokens,
-    spender: IDL.Opt(IDL.Vec(IDL.Nat8)),
-  });
-  const Mint = IDL.Record({ to: AccountIdentifier, amount: Tokens });
-  const Burn = IDL.Record({
-    from: AccountIdentifier,
-    spender: IDL.Opt(AccountIdentifier),
-    amount: Tokens,
-  });
-  const Approve = IDL.Record({
-    from: AccountIdentifier,
-    spender: AccountIdentifier,
-    allowance_e8s: IDL.Int,
-    allowance: Tokens,
-    fee: Tokens,
-    expires_at: IDL.Opt(TimeStamp),
-    expected_allowance: IDL.Opt(Tokens),
-  });
-
-  const Operation = IDL.Variant({ Transfer, Mint, Burn, Approve });
-  const Transaction = IDL.Record({
-    memo: Memo,
-    icrc1_memo: IDL.Opt(IDL.Vec(IDL.Nat8)),
-    operation: IDL.Opt(Operation),
-    created_at_time: TimeStamp,
-  });
-
-  const Block = IDL.Record({
-    parent_hash: IDL.Opt(IDL.Vec(IDL.Nat8)),
-    transaction: Transaction,
-    timestamp: TimeStamp,
-  });
-
-  const GetBlocksArgs = IDL.Record({ start: BlockIndex, length: IDL.Nat64 });
-  const QueryBlocksResponse = IDL.Rec();
-
-  const BlockRange = IDL.Record({ blocks: IDL.Vec(Block) });
-  const QueryArchiveError = IDL.Variant({
-    BadFirstBlockIndex: IDL.Record({ requested_index: BlockIndex, first_valid_index: BlockIndex }),
-    Other: IDL.Record({ error_code: IDL.Nat64, error_message: IDL.Text }),
-  });
-  const QueryArchiveResult = IDL.Variant({ Ok: BlockRange, Err: QueryArchiveError });
-  const QueryArchiveFn = IDL.Func([GetBlocksArgs], [QueryArchiveResult], ["query"]);
-
-  const ArchivedBlockRange = IDL.Record({
-    start: BlockIndex,
-    length: IDL.Nat64,
-    callback: QueryArchiveFn,
-  });
-
-  QueryBlocksResponse.fill(
-    IDL.Record({
-      chain_length: IDL.Nat64,
-      certificate: IDL.Opt(IDL.Vec(IDL.Nat8)),
-      blocks: IDL.Vec(Block),
-      first_block_index: BlockIndex,
-      archived_blocks: IDL.Vec(ArchivedBlockRange),
-    })
-  );
-
-  return IDL.Service({
-    query_blocks: IDL.Func([GetBlocksArgs], [QueryBlocksResponse], ["query"]),
-    symbol: IDL.Func([], [IDL.Record({ symbol: IDL.Text })], ["query"]),
-    decimals: IDL.Func([], [IDL.Record({ decimals: IDL.Nat32 })], ["query"]),
-  });
+  // Sanity check indices
+  verifyIndices: {
+    ckBTC: BigInt(env.getNumber("VERIFY_CKBTC_INDEX", 2_783_712, 0)),
+    ckUSDC: BigInt(env.getNumber("VERIFY_CKUSDC_INDEX", 408_821, 0)),
+    ICP: BigInt(env.getNumber("VERIFY_ICP_INDEX", 25_906_544, 0)),
+  },
 };
 
-// ---------------- ICRC-3 IDL ----------------
-const ICRC3_IDL = ({ IDL }: { IDL: typeof import("@dfinity/candid").IDL }) => {
-  const Value = IDL.Rec();
-  Value.fill(
-    IDL.Variant({
-      Blob: IDL.Vec(IDL.Nat8),
-      Text: IDL.Text,
-      Nat: IDL.Nat,
-      Int: IDL.Int,
-      Array: IDL.Vec(Value),
-      Map: IDL.Vec(IDL.Tuple(IDL.Text, Value)),
-    })
-  );
+// ==================== API Endpoints ====================
 
-  const GetBlocksArgs = IDL.Vec(IDL.Record({ start: IDL.Nat, length: IDL.Nat }));
-  const GetBlocksResult = IDL.Rec();
-  GetBlocksResult.fill(
-    IDL.Record({
-      log_length: IDL.Nat,
-      blocks: IDL.Vec(IDL.Record({ id: IDL.Nat, block: Value })),
-      archived_blocks: IDL.Vec(
-        IDL.Record({
-          args: GetBlocksArgs,
-          callback: IDL.Func([GetBlocksArgs], [GetBlocksResult], ["query"]),
-        })
-      ),
-    })
-  );
-
-  return IDL.Service({
-    icrc1_symbol: IDL.Func([], [IDL.Text], ["query"]),
-    icrc1_decimals: IDL.Func([], [IDL.Nat8], ["query"]),
-    icrc3_get_blocks: IDL.Func([GetBlocksArgs], [GetBlocksResult], ["query"]),
-  });
+const endpoints = {
+  ledger: {
+    host: "https://ledger-api.internetcomputer.org",
+    bases: [
+      "https://ledger-api.internetcomputer.org/api",
+      "https://ledger-api.internetcomputer.org",
+    ],
+  },
+  icrc: {
+    v1: "https://icrc-api.internetcomputer.org/api/v1",
+    v2: "https://icrc-api.internetcomputer.org/api/v2",
+  },
+  rosetta: {
+    icp: env.getString("ICP_ROSETTA_URL", "https://rosetta-api.internetcomputer.org"),
+    icrc: env.getString("ICRC_ROSETTA_URL", ""),
+  },
 };
 
-// ---------------- Types ----------------
-type Account = { owner: Principal; subaccount?: number[] | null };
+// Token metadata
+const tokenMetadata: Record<string, { symbol: string; decimals: number }> = {
+  [config.ledgers.ICP]: { symbol: "ICP", decimals: 8 },
+  [config.ledgers.ckBTC]: { symbol: "ckBTC", decimals: 8 },
+  [config.ledgers.ckUSDC]: { symbol: "ckUSDC", decimals: 6 },
+  [config.ledgers.ckUSDT]: { symbol: "ckUSDT", decimals: 6 },
+};
+
+// ==================== Types ====================
+
+type Direction = "inflow" | "outflow" | "self" | "mint" | "burn";
 
 type CsvRow = {
   date_iso: string;
   token: string;
-  direction: "inflow" | "outflow" | "self" | "mint" | "burn";
+  direction: Direction;
   amount: string;
-  from_principal: string; // for ICP rows we store account-id hex here
-  to_principal: string; // for ICP rows we store account-id hex here
+  from_principal: string;
+  to_principal: string;
   block_index: string;
   memo: string;
 };
 
-// ---------------- CSV helpers ----------------
-const CSV_HEADER: (keyof CsvRow)[] = [
-  "date_iso",
-  "token",
-  "direction",
-  "amount",
-  "from_principal",
-  "to_principal",
-  "block_index",
-  "memo",
-];
+type IcpTx = {
+  block_height: string;
+  block_hash: string;
+  transaction_hash: string;
+  transfer_type: "transfer" | "mint" | "burn" | "approve";
+  amount: string;
+  fee?: string;
+  from_account_identifier?: string;
+  to_account_identifier?: string;
+  created_at: number; // epoch seconds
+  memo?: string;
+};
 
-function ensureCsvHeader(path: string) {
-  try {
+type IcrcTx = {
+  id: string;
+  timestamp: string;
+  op: string;
+  from?: { owner: string; subaccount?: string } | undefined;
+  to?: { owner: string; subaccount?: string } | undefined;
+  amount?: string;
+  symbol?: string;
+  decimals?: number;
+  memo_hex?: string;
+};
+
+// ==================== CSV Utilities ====================
+
+const csv = {
+  header: [
+    "date_iso",
+    "token",
+    "direction",
+    "amount",
+    "from_principal",
+    "to_principal",
+    "block_index",
+    "memo",
+  ] as const,
+
+  ensureHeader: (path: string): void => {
     if (!fs.existsSync(path) || fs.statSync(path).size === 0) {
-      fs.writeFileSync(path, CSV_HEADER.join(",") + "\n", "utf8");
+      fs.writeFileSync(path, csv.header.join(",") + "\n", "utf8");
     }
-  } catch (e) {
-    console.error(`Failed to init CSV ${path}:`, e);
-  }
-}
+  },
 
-function csvEscape(v: unknown): string {
-  return `"${String(v ?? "").replace(/"/g, '""')}"`;
-}
+  escape: (value: unknown): string => {
+    return `"${String(value ?? "").replace(/"/g, '""')}"`;
+  },
 
-function rowToCsvLine(r: CsvRow): string {
-  return (
-    [
-      r.date_iso,
-      r.token,
-      r.direction,
-      r.amount,
-      r.from_principal,
-      r.to_principal,
-      r.block_index,
-      r.memo,
-    ]
-      .map(csvEscape)
-      .join(",") + "\n"
-  );
-}
+  appendRow: (path: string, row: CsvRow): void => {
+    const values = csv.header.map((key) => row[key]);
+    const line = values.map(csv.escape).join(",") + "\n";
+    fs.appendFileSync(path, line, "utf8");
+  },
+};
+// ==================== Utility Functions ====================
 
-function appendRow(path: string, row: CsvRow) {
-  try {
-    fs.appendFileSync(path, rowToCsvLine(row), "utf8");
-  } catch (e) {
-    console.error(`Failed to append to ${path}:`, e, row);
-  }
-}
+const utils = {
+  /**
+   * Format amount with proper decimal places
+   * Example: formatAmount("123456", 2) => "1234.56"
+   */
+  formatAmount: (raw: string, decimals: number): string => {
+    const cleanAmount = (raw || "0").replace(/^0+/, "") || "0";
+    if (decimals <= 0) return cleanAmount;
 
-function logRow(symbol: string, r: CsvRow) {
-  const path =
-    r.from_principal || r.to_principal
-      ? ` | ${r.from_principal || "-"} -> ${r.to_principal || "-"}`
-      : "";
-  const memo = r.memo ? ` | memo=${r.memo}` : "";
-  console.log(
-    `    [+] ${symbol} ${r.direction} ${r.amount} @ block ${r.block_index} | ${r.date_iso}${path}${memo}`
-  );
-}
+    const whole = cleanAmount.length > decimals ? cleanAmount.slice(0, -decimals) : "0";
+    const fraction =
+      cleanAmount.length > decimals
+        ? cleanAmount.slice(-decimals)
+        : cleanAmount.padStart(decimals, "0");
+    const trimmedFraction = fraction.replace(/0+$/, "");
 
-// Convenience: log + append together
-function emitRow(symbol: string, row: CsvRow) {
-  logRow(symbol, row);
-  appendRow(OUT_CSV, row);
-}
+    return trimmedFraction ? `${whole}.${trimmedFraction}` : whole;
+  },
 
-// ---------------- Generic helpers ----------------
-function hexToBytes(hex: string): number[] {
-  const s = hex.replace(/^0x/, "").toLowerCase();
-  if (!s.length) return [];
-  if (s.length % 2 !== 0) throw new Error(`Invalid hex length for "${hex}"`);
-  const out: number[] = [];
-  for (let i = 0; i < s.length; i += 2) out.push(parseInt(s.slice(i, i + 2), 16));
-  return out;
-}
+  /**
+   * Convert various timestamp formats to ISO string
+   * Handles: ISO strings, epoch seconds, milliseconds, microseconds, nanoseconds
+   */
+  toISO: (timestamp: any): string => {
+    if (!timestamp) return "";
 
-function bytesToHex(u8: Uint8Array): string {
-  return [...u8].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function acctStr(a: Account | null): string {
-  if (!a) return "<nil>";
-  const sa = normalizeSub(a.subaccount ?? null);
-  const saHex = sa ? bytesToHex(Uint8Array.from(sa)) : "(default)";
-  return `${a.owner.toText()} / sa=${saHex}`;
-}
-
-function toHex(a: Uint8Array): string {
-  return [...a].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function accountIdToHex(accountId: number[]): string {
-  return toHex(new Uint8Array(accountId));
-}
-
-function memoToHex(m?: unknown): string {
-  if (!m) return "";
-  // ICP uses u64 for memo
-  if (typeof m === "bigint" || typeof m === "number") {
-    return BigInt(m).toString(16).padStart(16, "0");
-  }
-  const bytes = m instanceof Uint8Array ? m : Uint8Array.from(m as ArrayLike<number>);
-  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function n64ToMillis(n?: unknown): number | null {
-  if (n === undefined || n === null) return null;
-  try {
-    const nanos = (n as { timestamp_nanos?: unknown }).timestamp_nanos ?? n;
-    return Number(BigInt(nanos as string | number | bigint) / 1_000_000n);
-  } catch {
-    return null;
-  }
-}
-
-function extractValue(value: unknown, key: string): unknown {
-  const v = value as { Map?: unknown };
-  if (!value || !v.Map) return null;
-  const map = (value as { Map?: [string, unknown][] }).Map;
-  if (!map) return null;
-  const entry = map.find(([k]) => k === key);
-  return entry ? entry[1] : null;
-}
-
-function extractText(value: unknown): string {
-  if (!value) return "";
-  const v = value as {
-    Text?: string;
-    Nat?: bigint | string | number;
-    Int?: bigint | string | number;
-  };
-  if (v.Text !== undefined) return v.Text;
-  if (v.Nat !== undefined) return String(v.Nat);
-  if (v.Int !== undefined) return String(v.Int);
-  return "";
-}
-
-function extractNat(value: unknown): bigint {
-  const v = value as { Nat?: bigint | string | number };
-  if (!value || v.Nat === undefined) return 0n;
-  return BigInt(v.Nat);
-}
-
-function extractBlob(value: unknown): number[] {
-  const v = value as { Blob?: number[] };
-  if (!value || !v.Blob) return [];
-  return v.Blob;
-}
-
-function extractAccount(value: unknown): Account | null {
-  if (!value) return null;
-
-  // Map form: { owner: Blob, subaccount: opt Blob }
-  const v = value as { Map?: unknown; Array?: unknown; Text?: string };
-  if (v.Map) {
-    const ownerVal = extractValue(value, "owner");
-    const subVal = extractValue(value, "subaccount");
-    const ownerBlob = extractBlob(ownerVal);
-    if (!ownerBlob.length) return null;
-    try {
-      const owner = Principal.fromUint8Array(new Uint8Array(ownerBlob));
-      const sub = extractBlob(subVal);
-      return { owner, subaccount: sub?.length ? sub : null };
-    } catch {
-      return null;
+    // Handle string dates
+    if (typeof timestamp === "string" && timestamp.trim() && isNaN(Number(timestamp))) {
+      const date = new Date(timestamp);
+      return Number.isFinite(date.getTime()) ? date.toISOString() : "";
     }
-  }
 
-  // Array/Tuple form: [ownerBlob, subaccountBlob?]
-  const arr = v.Array as { Blob?: number[] }[] | undefined;
-  if (arr && arr[0]?.Blob) {
-    try {
-      const owner = Principal.fromUint8Array(new Uint8Array(arr[0].Blob));
-      const sub = arr[1]?.Blob;
-      return { owner, subaccount: sub?.length ? sub : null };
-    } catch {
-      return null;
+    let numericTime = Number(timestamp);
+    if (!Number.isFinite(numericTime)) return "";
+
+    // Convert to milliseconds based on magnitude
+    if (numericTime > 1e18) {
+      numericTime = Math.floor(numericTime / 1e6); // nanoseconds to ms
+    } else if (numericTime > 1e15) {
+      numericTime = Math.floor(numericTime / 1e3); // microseconds to ms
+    } else if (numericTime > 1e12) {
+      numericTime = Math.floor(numericTime); // already milliseconds
+    } else if (numericTime > 1e5) {
+      numericTime = Math.floor(numericTime * 1000); // seconds to ms
     }
-  }
 
-  return null;
-}
+    const date = new Date(numericTime);
+    return Number.isFinite(date.getTime()) ? date.toISOString() : "";
+  },
 
-// Normalize subaccount - treat 32 zero bytes as null
-function normalizeSub(sa?: number[] | null): number[] | null {
-  if (!sa || !sa.length) return null;
-  if (sa.length === 32 && sa.every((b) => b === 0)) return null;
-  return sa;
-}
+  /**
+   * Normalize subaccount hex strings for comparison
+   */
+  normalizeSubaccount: (sub?: string): string => {
+    const normalized = (sub || "").replace(/^0x/, "").toLowerCase();
+    return !normalized || /^0+$/.test(normalized) ? "" : normalized;
+  },
+};
 
-function eqAccount(a: Account | null, b: Account): boolean {
-  if (!a) return false;
-  if (a.owner.toText() !== b.owner.toText()) return false;
-  const sa = normalizeSub(a.subaccount);
-  const sb = normalizeSub(b.subaccount);
-  if (!sa && !sb) return true;
-  if (!!sa !== !!sb || sa!.length !== sb!.length) return false;
-  for (let i = 0; i < sa!.length; i++) if (sa![i] !== sb![i]) return false;
-  return true;
-}
-
-// Matching helper honoring STRICT_SUBACCOUNT_MATCH
-function accountMatches(a: Account | null, b: Account, strict: boolean): boolean {
-  if (!a) return false;
-  if (a.owner.toText() !== b.owner.toText()) return false;
-  return strict ? eqAccount(a, b) : true;
-}
-
-function formatAmount(raw: string, decimals: number): string {
-  const s = raw.replace(/^0+/, "") || "0";
-  if (decimals <= 0) return s;
-  const whole = s.length > decimals ? s.slice(0, -decimals) : "0";
-  const frac = s.length > decimals ? s.slice(-decimals) : s.padStart(decimals, "0");
-  const trimmed = frac.replace(/0+$/, "");
-  return trimmed.length ? `${whole}.${trimmed}` : whole;
-}
-
-// Lightweight promise limiter (no deps)
-function pLimit(max: number) {
-  let active = 0;
-  const queue: Array<() => void> = [];
-  const next = () => {
-    active--;
-    if (queue.length) queue.shift()!();
-  };
-  return function <T>(fn: () => Promise<T>): Promise<T> {
-    return new Promise((resolve, reject) => {
-      const run = () => {
-        active++;
-        fn()
-          .then((v) => {
-            next();
-            resolve(v);
-          })
-          .catch((e) => {
-            next();
-            reject(e);
-          });
+// ==================== HTTP Utilities ====================
+type RosettaSearchTx = {
+  block_identifier: { index: number; hash: string };
+  transaction: {
+    transaction_identifier: { hash: string };
+    operations: Array<{
+      operation_identifier: { index: number };
+      type: string;
+      status: string;
+      account?: {
+        address: string;
+        sub_account?: { address: string };
       };
-      if (active < max) run();
-      else queue.push(run);
-    });
+      amount?: {
+        value: string;
+        currency: { symbol: string; decimals: number };
+      };
+      metadata?: any;
+    }>;
+    metadata: {
+      timestamp?: string;
+      memo?: string;
+      [key: string]: any;
+    };
   };
-}
+};
 
-function buildSegments(startIndex: bigint, endIndex: bigint, page: number) {
-  const segs: Array<{ start: bigint; length: bigint; idx: number }> = [];
-  let cursor = endIndex;
-  let idx = 0;
-  while (cursor >= startIndex) {
-    const length = BigInt(Math.min(page, Number(cursor - startIndex + 1n)));
-    const start = cursor - (length - 1n);
-    segs.push({ start, length, idx });
-    if (start === 0n) break;
-    cursor = start - 1n;
-    idx++;
-  }
-  return segs;
-}
+const http = {
+  /**
+   * Build query string from parameters
+   */
+  buildQueryString: (params?: Record<string, string | number | undefined>): string => {
+    if (!params) return "";
+    const entries = Object.entries(params)
+      .filter(([, value]) => value !== undefined && value !== "")
+      .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
+    return entries.length > 0 ? `?${entries.join("&")}` : "";
+  },
 
-// ---------------- Actor factories ----------------
-function makeIcpActor(agent: HttpAgent, canisterId: string | Principal) {
-  return Actor.createActor(ICP_LEDGER_IDL as any, { agent, canisterId });
-}
-function makeIcrc3Actor(agent: HttpAgent, canisterId: string | Principal) {
-  return Actor.createActor(ICRC3_IDL as any, { agent, canisterId });
-}
+  /**
+   * Fetch JSON from a URL with query parameters
+   */
+  getJson: async <T>(
+    url: string,
+    params?: Record<string, string | number | undefined>
+  ): Promise<T> => {
+    const fullUrl = url + http.buildQueryString(params);
+    const response = await fetch(fullUrl);
 
-function makeIcrc3ArchiveActor(
-  agent: HttpAgent,
-  canisterId: string | Principal,
-  methodName: string,
-  returnsVariant = false
-) {
-  const ArchiveIDL = ({ IDL }: any) => {
-    const Value = IDL.Rec();
-    Value.fill(
-      IDL.Variant({
-        Blob: IDL.Vec(IDL.Nat8),
-        Text: IDL.Text,
-        Nat: IDL.Nat,
-        Int: IDL.Int,
-        Array: IDL.Vec(Value),
-        Map: IDL.Vec(IDL.Tuple(IDL.Text, Value)),
-      })
-    );
-    const GetBlocksArgs = IDL.Vec(IDL.Record({ start: IDL.Nat, length: IDL.Nat }));
-    const GetBlocksResult = IDL.Rec();
-    GetBlocksResult.fill(
-      IDL.Record({
-        log_length: IDL.Nat,
-        blocks: IDL.Vec(IDL.Record({ id: IDL.Nat, block: Value })),
-        archived_blocks: IDL.Vec(
-          IDL.Record({
-            args: GetBlocksArgs,
-            callback: IDL.Func([GetBlocksArgs], [GetBlocksResult], ["query"]),
-          })
-        ),
-      })
-    );
-
-    const Ret = returnsVariant
-      ? IDL.Variant({ Ok: GetBlocksResult, Err: IDL.Text }) // loose Err keeps us flexible
-      : GetBlocksResult;
-
-    return IDL.Service({
-      [methodName]: IDL.Func([GetBlocksArgs], [Ret], ["query"]),
-    });
-  };
-  return Actor.createActor(ArchiveIDL as any, { agent, canisterId });
-}
-
-// ---------------- Reusable fetchers (start, length) ----------------
-type IcpFetched = { index: bigint; block: any };
-async function fetchIcpBlocks(
-  actor: any,
-  agent: HttpAgent,
-  _canisterId: string | Principal,
-  start: bigint,
-  length: bigint,
-  limitArchive: ReturnType<typeof pLimit>
-): Promise<IcpFetched[]> {
-  const out: IcpFetched[] = [];
-  const res = await actor.query_blocks({ start, length });
-
-  const blocks = (res?.blocks || []) as any[];
-  const firstIdx = res?.first_block_index ?? start;
-  for (let i = 0; i < blocks.length; i++) {
-    out.push({ index: firstIdx + BigInt(i), block: blocks[i] });
-  }
-
-  const archived = (res?.archived_blocks || []) as Array<{
-    start: bigint;
-    length: bigint;
-    callback: [Principal, string];
-  }>;
-
-  if (VERBOSE_FETCH) {
-    console.log(
-      `[fetch][ICP] ${start}..${start + length - 1n} main=${blocks.length} archEntries=${archived.length}`
-    );
-  }
-
-  await Promise.all(
-    archived.map((ar) =>
-      limitArchive(async () => {
-        const [archiveCanister, method] = ar.callback ?? [];
-        const ArchiveIDL = ({ IDL }: any) => {
-          const AccountIdentifier = IDL.Vec(IDL.Nat8);
-          const Tokens = IDL.Record({ e8s: IDL.Nat64 });
-          const Memo = IDL.Nat64;
-          const TimeStamp = IDL.Record({ timestamp_nanos: IDL.Nat64 });
-          const BlockIndex = IDL.Nat64;
-          const Transfer = IDL.Record({
-            from: AccountIdentifier,
-            to: AccountIdentifier,
-            amount: Tokens,
-            fee: Tokens,
-            spender: IDL.Opt(IDL.Vec(IDL.Nat8)),
-          });
-          const Mint = IDL.Record({ to: AccountIdentifier, amount: Tokens });
-          const Burn = IDL.Record({
-            from: AccountIdentifier,
-            spender: IDL.Opt(AccountIdentifier),
-            amount: Tokens,
-          });
-          const Approve = IDL.Record({
-            from: AccountIdentifier,
-            spender: AccountIdentifier,
-            allowance_e8s: IDL.Int,
-            allowance: Tokens,
-            fee: Tokens,
-            expires_at: IDL.Opt(TimeStamp),
-            expected_allowance: IDL.Opt(Tokens),
-          });
-          const Operation = IDL.Variant({ Transfer, Mint, Burn, Approve });
-          const Transaction = IDL.Record({
-            memo: Memo,
-            icrc1_memo: IDL.Opt(IDL.Vec(IDL.Nat8)),
-            operation: IDL.Opt(Operation),
-            created_at_time: TimeStamp,
-          });
-          const Block = IDL.Record({
-            parent_hash: IDL.Opt(IDL.Vec(IDL.Nat8)),
-            transaction: Transaction,
-            timestamp: TimeStamp,
-          });
-          return IDL.Service({
-            [method || "get_blocks"]: IDL.Func(
-              [IDL.Record({ start: IDL.Nat64, length: IDL.Nat64 })],
-              [
-                IDL.Variant({
-                  Ok: IDL.Record({ blocks: IDL.Vec(Block) }),
-                  Err: IDL.Variant({
-                    BadFirstBlockIndex: IDL.Record({
-                      requested_index: BlockIndex,
-                      first_valid_index: BlockIndex,
-                    }),
-                    Other: IDL.Record({ error_code: IDL.Nat64, error_message: IDL.Text }),
-                  }),
-                }),
-              ],
-              ["query"]
-            ),
-          });
-        };
-        const archive = Actor.createActor(ArchiveIDL as any, {
-          agent,
-          canisterId: archiveCanister,
-        });
-        const r = await (archive as any)[method || "get_blocks"]({
-          start: ar.start,
-          length: ar.length,
-        });
-        const ok = (r && (r.Ok || r.ok)) as { blocks: any[] } | undefined;
-        const arr = ok?.blocks || [];
-        if (VERBOSE_FETCH) {
-          console.log(
-            `  [fetch-arch][ICP] ${ar.start}..${ar.start + ar.length - 1n} blocks=${arr.length}`
-          );
-        }
-        for (let i = 0; i < arr.length; i++) {
-          out.push({ index: BigInt(ar.start) + BigInt(i), block: arr[i] });
-        }
-      })
-    )
-  );
-
-  return out;
-}
-
-type IcrcFetched = { id: bigint; block: any };
-
-async function fetchIcrc3Blocks(
-  actor: any,
-  agent: HttpAgent,
-  _canisterId: string | Principal,
-  start: bigint,
-  length: bigint,
-  limitArchive: ReturnType<typeof pLimit>
-): Promise<IcrcFetched[]> {
-  const out: IcrcFetched[] = [];
-
-  // Helper to push blocks handling any bigint-ish ids
-  const pushBlocks = (arr: Array<{ id: any; block: any }>) => {
-    for (const b of arr || []) out.push({ id: BigInt(b.id), block: b.block });
-  };
-
-  // Main call
-  const res = await actor.icrc3_get_blocks([{ start, length }]);
-  if (VERBOSE_FETCH) {
-    const mainN = Array.isArray(res?.blocks) ? res.blocks.length : 0;
-    const archN = Array.isArray(res?.archived_blocks) ? res.archived_blocks.length : 0;
-    console.log(
-      `[fetch][ICRC3] ${start}..${start + length - 1n} main=${mainN} archEntries=${archN}`
-    );
-  }
-  pushBlocks(res?.blocks);
-
-  const archived = (res?.archived_blocks || []) as Array<{
-    args: Array<{ start: bigint; length: bigint }>;
-    callback: [Principal, string];
-  }>;
-
-  // Fetch archives with multiple method/signature fallbacks on the same archive canister.
-  await Promise.all(
-    archived.flatMap((ai) => {
-      const [cbPrin, cbMethodRaw] = ai.callback || [];
-      const cbMethod =
-        typeof cbMethodRaw === "string" && cbMethodRaw.length ? cbMethodRaw : "icrc3_get_blocks";
-
-      const tries: Array<{ name: string; variant: boolean }> = [
-        { name: cbMethod, variant: false },
-        { name: cbMethod, variant: true },
-        { name: "get_blocks", variant: false },
-        { name: "get_blocks", variant: true },
-        { name: "icrc3_get_blocks", variant: false },
-        { name: "icrc3_get_blocks", variant: true },
-      ];
-
-      return ai.args.map((argsEntry) =>
-        limitArchive(async () => {
-          let fetched = false;
-          let lastErr: unknown = null;
-          for (const t of tries) {
-            try {
-              const a = makeIcrc3ArchiveActor(agent, cbPrin, t.name, t.variant);
-              const r = await (a as any)[t.name]([argsEntry]);
-              const ok = r && (r.Ok || r.ok) ? r.Ok || r.ok : r;
-              const aBlocks = (ok?.blocks || []) as Array<{ id: any; block: any }>;
-              if (Array.isArray(aBlocks)) {
-                if (VERBOSE_FETCH) {
-                  console.log(
-                    `  [fetch-arch][ICRC3] ${String(cbPrin)}.${t.name} ` +
-                      `[${argsEntry.start}..${argsEntry.start + argsEntry.length - 1n}] blocks=${aBlocks.length}` +
-                      (t.variant ? " (variant)" : "")
-                  );
-                }
-                pushBlocks(aBlocks);
-                fetched = true;
-                break;
-              }
-            } catch (e) {
-              lastErr = e;
-            }
-          }
-          if (!fetched && VERBOSE_FETCH) {
-            console.warn(
-              `  [fetch-arch][ICRC3] ${String(cbPrin)} candid fallbacks failed for ` +
-                `[${argsEntry.start}..${argsEntry.start + argsEntry.length - 1n}] (callback "${cbMethod}"). ` +
-                `Archive may be protobuf-only.`,
-              lastErr
-            );
-          }
-        })
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => "");
+      throw new Error(
+        `HTTP ${response.status} ${response.statusText} for ${fullUrl}\n${errorBody.slice(0, 256)}`
       );
-    })
-  );
-
-  return out;
-}
-
-// ---------------- Symbol/decimals ----------------
-async function getSymbolAndDecimals(
-  actor: unknown,
-  isIcp: boolean
-): Promise<{ symbol: string; decimals: number }> {
-  let symbol = "TOKEN";
-  let decimals = 0;
-  try {
-    if (isIcp) {
-      const icpActor = actor as {
-        symbol: () => Promise<{ symbol: string }>;
-        decimals: () => Promise<{ decimals: number }>;
-      };
-      symbol = (await icpActor.symbol()).symbol;
-      decimals = Number((await icpActor.decimals()).decimals);
-    } else {
-      const icrcActor = actor as unknown as {
-        icrc1_symbol: () => Promise<string>;
-        icrc1_decimals: () => Promise<number>;
-      };
-      symbol = await icrcActor.icrc1_symbol();
-      decimals = Number(await icrcActor.icrc1_decimals());
     }
-  } catch {
-    // Ignore symbol/decimals fetch errors
-  }
-  return { symbol, decimals };
-}
 
-// ---------------- Parallel scanners (using reusable fetchers) ----------------
-async function scanIcpLedger(canisterId: string, icpAccountIdHex: string): Promise<CsvRow[]> {
-  const targetHex = icpAccountIdHex.toLowerCase();
-  const agent = new HttpAgent({ host: HOST });
-  const actor = makeIcpActor(agent, canisterId);
-  const { symbol, decimals } = await getSymbolAndDecimals(actor, true);
-  console.log(`  Symbol: ${symbol}, Decimals: ${decimals}`);
+    return response.json() as Promise<T>;
+  },
 
-  // Get tip + compute bounded window
-  let chainLength = 0n;
-  try {
-    const meta = await (actor as any).query_blocks({ start: 0n, length: 0n });
-    chainLength = meta.chain_length;
-  } catch (e) {
-    console.error(`  Failed to get chain length:`, e);
-    return [];
-  }
+  /**
+   * Try multiple base URLs until one succeeds
+   */
+  getJsonFromBases: async <T>(
+    path: string,
+    params?: Record<string, string | number | undefined>
+  ): Promise<T> => {
+    const queryString = http.buildQueryString(params);
+    const urls = endpoints.ledger.bases.map((base) => `${base}${path}${queryString}`);
 
-  const endIndex = chainLength - 1n;
-  const startIndex =
-    endIndex > BigInt(MAX_BLOCKS_PER_LEDGER) ? endIndex - BigInt(MAX_BLOCKS_PER_LEDGER) : 0n;
-
-  const segs = buildSegments(startIndex, endIndex, PAGE);
-  console.log(
-    `  Scanning ICP blocks ${startIndex}..${endIndex} in ${segs.length} segments (PAGE=${PAGE}, CONCURRENCY=${CONCURRENCY})`
-  );
-
-  const limit = pLimit(CONCURRENCY);
-  const limitArchive = pLimit(ARCHIVE_CONCURRENCY);
-
-  const rows: CsvRow[] = [];
-  let segDone = 0;
-  let blocksSeen = 0;
-  let matches = 0;
-
-  function handleBlock(block: any, blockIndex: bigint) {
-    const ts = n64ToMillis(block?.timestamp);
-    if (ts && (ts < FROM_MS || ts > TO_MS)) return;
-
-    const tx = block?.transaction;
-    const opVal = tx?.operation;
-    const optInner = Array.isArray(opVal) ? opVal[0] : opVal;
-    if (!optInner) return;
-    const opKey = Object.keys(optInner)[0];
-    if (opKey !== "Transfer") return;
-
-    const op = (optInner as any)[opKey] as {
-      from?: number[];
-      to?: number[];
-      amount?: { e8s?: bigint };
-    };
-    const fromHex = accountIdToHex(op.from || []);
-    const toHex = accountIdToHex(op.to || []);
-    const amount = (op.amount?.e8s || 0n).toString();
-    const memo = memoToHex(tx?.memo);
-
-    let direction: CsvRow["direction"] | null = null;
-    if (fromHex === targetHex && toHex === targetHex) direction = "self";
-    else if (toHex === targetHex) direction = "inflow";
-    else if (fromHex === targetHex) direction = "outflow";
-
-    if (direction) {
-      const date_iso = ts ? new Date(ts).toISOString() : "";
-      const row: CsvRow = {
-        date_iso,
-        token: symbol,
-        direction,
-        amount: formatAmount(amount, decimals),
-        // fill these with account-id hex so CSV isn't empty
-        from_principal: fromHex,
-        to_principal: toHex,
-        block_index: blockIndex.toString(),
-        memo,
-      };
-      rows.push(row);
-      emitRow(symbol, row);
-      matches++;
-    }
-  }
-
-  await Promise.all(
-    segs.map((seg) =>
-      limit(async () => {
-        const label = `seg#${seg.idx + 1}/${segs.length} [${seg.start}..${
-          seg.start + seg.length - 1n
-        }]`;
-        try {
-          const fetched = await fetchIcpBlocks(
-            actor,
-            agent,
-            canisterId,
-            seg.start,
-            seg.length,
-            limitArchive
-          );
-          for (const { index, block } of fetched) handleBlock(block, index);
-          blocksSeen += fetched.length;
-          segDone++;
-          if (segDone % PROGRESS_EVERY === 0 || segDone === segs.length) {
-            console.log(
-              `  [ICP] ${label} DONE | segments=${segDone}/${segs.length}, blocksSeen≈${blocksSeen}, matches=${matches}`
-            );
-          }
-        } catch (e) {
-          segDone++;
-          console.error(`  [ICP] ${label} ERROR:`, e);
-        }
-      })
-    )
-  );
-
-  console.log(
-    `  [ICP] Parallel scan complete. segments=${segs.length}, blocksSeen≈${blocksSeen}, matches=${matches}`
-  );
-  return rows;
-}
-
-async function scanIcrcLedger(
-  name: string,
-  canisterId: string,
-  wallet: Account
-): Promise<CsvRow[]> {
-  const agent = new HttpAgent({ host: HOST });
-  const actor = makeIcrc3Actor(agent, canisterId);
-  const { symbol, decimals } = await getSymbolAndDecimals(actor, false);
-  console.log(`  Symbol: ${symbol}, Decimals: ${decimals}`);
-
-  let logLength = 0n;
-  try {
-    const info = await (actor as any).icrc3_get_blocks([{ start: 0n, length: 0n }]);
-    logLength = BigInt(info.log_length);
-    console.log(`  Total blocks: ${logLength}`);
-  } catch (e) {
-    console.error(`  Failed to get ${name} log length:`, e);
-    return [];
-  }
-  if (logLength === 0n) return [];
-
-  const endIndex = logLength - 1n;
-  const scanStart =
-    endIndex > BigInt(MAX_BLOCKS_PER_LEDGER) ? endIndex - BigInt(MAX_BLOCKS_PER_LEDGER) : 0n;
-
-  const segs = buildSegments(scanStart, endIndex, PAGE);
-  console.log(
-    `  Scanning ${name} blocks ${scanStart}..${endIndex} in ${segs.length} segments (PAGE=${PAGE}, CONCURRENCY=${CONCURRENCY})`
-  );
-
-  const limit = pLimit(CONCURRENCY);
-  const limitArchive = pLimit(ARCHIVE_CONCURRENCY);
-
-  const rows: CsvRow[] = [];
-  let segDone = 0;
-  let blocksSeen = 0;
-  let matches = 0;
-
-  // Support flat and nested ICRC-1/3 shapes; emit transfer/mint/burn.
-  function handleIcrcBlock(bw: { id: bigint; block: any }) {
-    const block = bw.block;
-    const ts = extractNat(extractValue(block, "ts"));
-    if (ts < FROM_TS || ts > TO_TS) return;
-
-    const tx = extractValue(block, "tx");
-    if (!tx || !(tx as any).Map) return;
-
-    const opRaw =
-      extractText(extractValue(tx, "op")) ||
-      extractText(extractValue(block, "btype")) ||
-      extractText(extractValue(block, "type")) ||
-      "";
-    const op = opRaw.toLowerCase();
-
-    const nestedTransfer = extractValue(tx, "transfer");
-    const nestedMint = extractValue(tx, "mint");
-    const nestedBurn = extractValue(tx, "burn");
-    const readAmt = (v: unknown) => {
-      const a = extractNat(extractValue(v, "amt"));
-      const amount = a > 0n ? a : extractNat(extractValue(v, "amount"));
-      return amount.toString();
-    };
-
-    let kind: "transfer" | "mint" | "burn" | "" = "";
-    let from: Account | null = null;
-    let to: Account | null = null;
-    let amount = "0";
-    let memo = "";
-
-    if (nestedTransfer && (nestedTransfer as any).Map) {
-      kind = "transfer";
-      from = extractAccount(extractValue(nestedTransfer, "from"));
-      to = extractAccount(extractValue(nestedTransfer, "to"));
-      amount = readAmt(nestedTransfer);
-      memo = toHex(new Uint8Array(extractBlob(extractValue(nestedTransfer, "memo"))));
-    } else if (nestedMint && (nestedMint as any).Map) {
-      kind = "mint";
-      to = extractAccount(extractValue(nestedMint, "to"));
-      amount = readAmt(nestedMint);
-      memo = toHex(new Uint8Array(extractBlob(extractValue(nestedMint, "memo"))));
-    } else if (nestedBurn && (nestedBurn as any).Map) {
-      kind = "burn";
-      from = extractAccount(extractValue(nestedBurn, "from"));
-      amount = readAmt(nestedBurn);
-      memo = toHex(new Uint8Array(extractBlob(extractValue(nestedBurn, "memo"))));
-    } else {
-      // Flat fallback (typed ICRC-3 blocks frequently use this).
-      const flatFrom = extractAccount(extractValue(tx, "from"));
-      const flatTo = extractAccount(extractValue(tx, "to"));
-      const flatAmt = extractNat(extractValue(tx, "amt")) || extractNat(extractValue(tx, "amount"));
-      const flatMemo = toHex(new Uint8Array(extractBlob(extractValue(tx, "memo"))));
-      if (flatAmt > 0n) {
-        amount = flatAmt.toString();
-        from = flatFrom;
-        to = flatTo;
-        memo = flatMemo;
-        if (op.includes("xfer") || op.includes("transfer")) kind = "transfer";
-        else if (op.includes("mint")) kind = "mint";
-        else if (op.includes("burn")) kind = "burn";
-        else if (from && to) kind = "transfer"; // heuristic when op missing
-      }
-    }
-    if (!kind) return;
-
-    let direction: CsvRow["direction"] | null = null;
-    if (kind === "transfer") {
-      const fromMatch = accountMatches(from, wallet, STRICT_SUBACCOUNT_MATCH);
-      const toMatch = accountMatches(to, wallet, STRICT_SUBACCOUNT_MATCH);
-      if (fromMatch && toMatch) direction = "self";
-      else if (toMatch) direction = "inflow";
-      else if (fromMatch) direction = "outflow";
-    } else if (kind === "mint") {
-      if (accountMatches(to, wallet, STRICT_SUBACCOUNT_MATCH)) direction = "mint";
-    } else if (kind === "burn") {
-      if (accountMatches(from, wallet, STRICT_SUBACCOUNT_MATCH)) direction = "burn";
-    }
-    if (!direction) return;
-
-    const row: CsvRow = {
-      date_iso: new Date(Number(ts) / 1_000_000).toISOString(),
-      token: symbol,
-      direction,
-      amount: formatAmount(amount, decimals),
-      from_principal: from?.owner.toText() || "",
-      to_principal: to?.owner.toText() || "",
-      block_index: bw.id.toString(),
-      memo,
-    };
-    rows.push(row);
-    emitRow(symbol, row);
-    matches++;
-  }
-
-  await Promise.all(
-    segs.map((seg) =>
-      limit(async () => {
-        const label = `[${name}] seg#${seg.idx + 1}/${segs.length} [${seg.start}..${
-          seg.start + seg.length - 1n
-        }]`;
-        try {
-          const fetched = await fetchIcrc3Blocks(
-            actor,
-            agent,
-            canisterId,
-            seg.start,
-            seg.length,
-            limitArchive
-          );
-          for (const bw of fetched) handleIcrcBlock(bw);
-          blocksSeen += fetched.length;
-          segDone++;
-          if (segDone % PROGRESS_EVERY === 0 || segDone === segs.length) {
-            console.log(
-              `  ${label} DONE | segments=${segDone}/${segs.length}, blocksSeen≈${blocksSeen}, matches=${matches}`
-            );
-          }
-        } catch (e) {
-          segDone++;
-          console.error(`  ${label} ERROR:`, e);
-        }
-      })
-    )
-  );
-
-  console.log(
-    `  [${name}] Parallel scan complete. segments=${segs.length}, blocksSeen≈${blocksSeen}, matches=${matches}`
-  );
-  return rows;
-}
-
-// ---------------- Would-Capture Checkers ----------------
-function wouldCaptureIcpBlock(
-  block: any,
-  icpAccountIdHex: string,
-  symbol: string,
-  decimals: number
-) {
-  const timestampMs = n64ToMillis(block?.timestamp);
-  const inWindow =
-    typeof timestampMs === "number" && timestampMs >= FROM_MS && timestampMs <= TO_MS;
-
-  let direction: CsvRow["direction"] | null = null;
-  let amount = "0";
-  let fromHex = "";
-  let toHex = "";
-  let memo = "";
-
-  const tx = block?.transaction;
-  const opVal = tx?.operation;
-  const optInner = Array.isArray(opVal) ? opVal[0] : opVal;
-  if (optInner) {
-    const opKey = Object.keys(optInner)[0];
-    if (opKey === "Transfer") {
-      const op = (optInner as any)[opKey] as {
-        from?: number[];
-        to?: number[];
-        amount?: { e8s?: bigint };
-      };
-      fromHex = accountIdToHex(op.from || []);
-      toHex = accountIdToHex(op.to || []);
-      amount = ((op.amount?.e8s ?? 0n) as bigint).toString();
-      memo = memoToHex(tx?.memo);
-
-      const matchesFrom = fromHex === icpAccountIdHex.toLowerCase();
-      const matchesTo = toHex === icpAccountIdHex.toLowerCase();
-
-      if (matchesFrom && matchesTo) direction = "self";
-      else if (matchesTo) direction = "inflow";
-      else if (matchesFrom) direction = "outflow";
-    }
-  }
-
-  const wouldEmit = !!direction && inWindow;
-
-  return {
-    wouldEmit,
-    direction,
-    inWindow,
-    timestampIso: timestampMs ? new Date(timestampMs).toISOString() : "",
-    fromHex,
-    toHex,
-    amountFmt: formatAmount(amount, decimals),
-    memo,
-    symbol,
-  };
-}
-
-function wouldCaptureIcrc3Block(
-  blockWrap: { id: bigint; block: any },
-  wallet: Account,
-  symbol: string,
-  decimals: number
-) {
-  const { id, block } = blockWrap;
-  const ts = extractNat(extractValue(block, "ts"));
-  const inWindow = ts >= FROM_TS && ts <= TO_TS;
-
-  let direction: CsvRow["direction"] | null = null;
-  let from: Account | null = null;
-  let to: Account | null = null;
-  let amount = "0";
-  let memo = "";
-
-  const tx = extractValue(block, "tx");
-  if (tx && (tx as any).Map) {
-    const opRaw =
-      extractText(extractValue(tx, "op")) ||
-      extractText(extractValue(block, "btype")) ||
-      extractText(extractValue(block, "type")) ||
-      "";
-    const op = opRaw.toLowerCase();
-
-    const nestedTransfer = extractValue(tx, "transfer");
-    const nestedMint = extractValue(tx, "mint");
-    const nestedBurn = extractValue(tx, "burn");
-    const readAmt = (v: unknown) => {
-      const a = extractNat(extractValue(v, "amt"));
-      const aa = a > 0n ? a : extractNat(extractValue(v, "amount"));
-      return aa.toString();
-    };
-
-    let kind: "transfer" | "mint" | "burn" | "" = "";
-    if (nestedTransfer && (nestedTransfer as any).Map) {
-      kind = "transfer";
-      from = extractAccount(extractValue(nestedTransfer, "from"));
-      to = extractAccount(extractValue(nestedTransfer, "to"));
-      amount = readAmt(nestedTransfer);
-      memo = toHex(new Uint8Array(extractBlob(extractValue(nestedTransfer, "memo"))));
-    } else if (nestedMint && (nestedMint as any).Map) {
-      kind = "mint";
-      to = extractAccount(extractValue(nestedMint, "to"));
-      amount = readAmt(nestedMint);
-      memo = toHex(new Uint8Array(extractBlob(extractValue(nestedMint, "memo"))));
-    } else if (nestedBurn && (nestedBurn as any).Map) {
-      kind = "burn";
-      from = extractAccount(extractValue(nestedBurn, "from"));
-      amount = readAmt(nestedBurn);
-      memo = toHex(new Uint8Array(extractBlob(extractValue(nestedBurn, "memo"))));
-    } else {
-      const flatFrom = extractAccount(extractValue(tx, "from"));
-      const flatTo = extractAccount(extractValue(tx, "to"));
-      const flatAmt = extractNat(extractValue(tx, "amt")) || extractNat(extractValue(tx, "amount"));
-      const flatMemo = toHex(new Uint8Array(extractBlob(extractValue(tx, "memo"))));
-      if (flatAmt > 0n) {
-        amount = flatAmt.toString();
-        from = flatFrom;
-        to = flatTo;
-        memo = flatMemo;
-        if (op.includes("xfer") || op.includes("transfer")) kind = "transfer";
-        else if (op.includes("mint")) kind = "mint";
-        else if (op.includes("burn")) kind = "burn";
-        else if (from && to) kind = "transfer";
+    let lastError: any;
+    for (const url of urls) {
+      try {
+        return await http.getJson<T>(url);
+      } catch (error) {
+        lastError = error;
       }
     }
 
-    if (kind === "transfer") {
-      const fromMatch = accountMatches(from, wallet, STRICT_SUBACCOUNT_MATCH);
-      const toMatch = accountMatches(to, wallet, STRICT_SUBACCOUNT_MATCH);
-      if (fromMatch && toMatch) direction = "self";
-      else if (toMatch) direction = "inflow";
-      else if (fromMatch) direction = "outflow";
-    } else if (kind === "mint") {
-      if (accountMatches(to, wallet, STRICT_SUBACCOUNT_MATCH)) direction = "mint";
-    } else if (kind === "burn") {
-      if (accountMatches(from, wallet, STRICT_SUBACCOUNT_MATCH)) direction = "burn";
+    throw lastError;
+  },
+
+  /**
+   * POST JSON to a Rosetta endpoint
+   */
+  postRosetta: async <T>(endpoint: string, body: any): Promise<T> => {
+    const response = await fetch(`${endpoints.rosetta.icp}${endpoint}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      throw new Error(`Rosetta ${response.status}: ${errorText.slice(0, 256)}`);
     }
-  }
 
-  const wouldEmit = !!direction && inWindow;
-  const ownerMatch =
-    (from && from.owner.toText() === wallet.owner.toText()) ||
-    (to && to.owner.toText() === wallet.owner.toText());
+    return response.json() as Promise<T>;
+  },
+};
 
-  return {
-    id: id.toString(),
-    wouldEmit,
-    direction,
-    inWindow,
-    timestampIso: ts ? new Date(Number(ts) / 1_000_000).toISOString() : "",
-    fromStr: acctStr(from),
-    toStr: acctStr(to),
-    amountFmt: formatAmount(amount, decimals),
-    memo,
-    symbol,
-    ownerMatch,
-    walletStr: acctStr(wallet),
-  };
-}
+// ==================== ICP Transaction Fetching ====================
 
-// ---------------- Sanity Check Functions (using reusable fetchers) ----------------
-async function sanityCheck_ckBTC(index: bigint, wallet: Account) {
-  console.log(`\n[Sanity] ckBTC @ ${LEDGERS.ckBTC} index=${index.toString()}`);
-  const agent = new HttpAgent({ host: HOST });
-  const actor = makeIcrc3Actor(agent, Principal.fromText(LEDGERS.ckBTC!));
-  const { symbol, decimals } = await getSymbolAndDecimals(actor, false);
+const icpTransactions = {
+  /**
+   * Normalize ICP v2 API response (handles different response shapes)
+   */
+  normalizeV2Response: (response: any): { items: IcpTx[]; next?: string } => {
+    const items = (response?.blocks ?? response?.data ?? response?.transactions ?? []) as IcpTx[];
+    const next = response?.next_cursor ?? response?.next ?? response?.links?.next;
+    return { items, next };
+  },
 
-  const out = await fetchIcrc3Blocks(actor as any, agent, LEDGERS.ckBTC!, index, 1n, pLimit(2));
-  const block = out.find((b) => b.id === index);
-  if (!block) {
-    console.log("  -> Could not fetch that block (not found in main/archives).");
-    return;
-  }
-  const verdict = wouldCaptureIcrc3Block(block, wallet, symbol, decimals);
+  /**
+   * Fetch ICP transactions for account (tries v2 then v1 API)
+   */
+  fetchByAccount: async (
+    accountHex: string,
+    fromISO: string,
+    toISO: string,
+    pageSize: number
+  ): Promise<IcpTx[]> => {
+    const limit = Math.min(100, pageSize); // API max is 100
+    const startTime = Math.floor(new Date(fromISO).getTime() / 1000);
+    const endTime = Math.floor(new Date(toISO).getTime() / 1000);
+    const transactions: IcpTx[] = [];
 
-  console.log(`  Block ts: ${verdict.timestampIso}`);
-  console.log(`  From: ${verdict.fromStr}`);
-  console.log(`  To  : ${verdict.toStr}`);
-  console.log(`  Amount: ${verdict.amountFmt} ${symbol}`);
-  console.log(`  In window? ${verdict.inWindow ? "YES" : "NO"}`);
-  console.log(`  Owner match (ignoring subaccount): ${verdict.ownerMatch ? "YES" : "NO"}`);
-  console.log(`  Wallet considered: ${verdict.walletStr}`);
-  console.log(
-    `  Would current scanner emit? ${verdict.wouldEmit ? `YES (${verdict.direction})` : "NO"}${
-      !verdict.wouldEmit && verdict.ownerMatch && !verdict.direction
-        ? "  (owner matched but subaccount differs — set WALLET_SUBACCOUNT_HEX accordingly)"
-        : ""
-    }`
-  );
-}
+    // Try v2 API with cursor pagination
+    try {
+      let cursor: string | undefined;
+      for (let iterations = 0; iterations < 1000; iterations++) {
+        const response = await http.getJsonFromBases<any>(
+          `/v2/accounts/${accountHex}/transactions`,
+          {
+            sort_by: "-block_height",
+            limit,
+            created_at_start: startTime,
+            created_at_end: endTime,
+            ...(cursor ? { after: cursor } : {}),
+          }
+        );
 
-async function sanityCheck_ckUSDC(index: bigint, wallet: Account) {
-  console.log(`\n[Sanity] ckUSDC @ ${LEDGERS.ckUSDC} index=${index.toString()}`);
-  const agent = new HttpAgent({ host: HOST });
-  const actor = makeIcrc3Actor(agent, Principal.fromText(LEDGERS.ckUSDC!));
-  const { symbol, decimals } = await getSymbolAndDecimals(actor, false);
+        const { items, next } = icpTransactions.normalizeV2Response(response);
+        transactions.push(...items);
 
-  const out = await fetchIcrc3Blocks(actor as any, agent, LEDGERS.ckUSDC!, index, 1n, pLimit(2));
-  const block = out.find((b) => b.id === index);
-  if (!block) {
-    console.log("  -> Could not fetch that block (not found in main/archives).");
-    return;
-  }
-  const verdict = wouldCaptureIcrc3Block(block, wallet, symbol, decimals);
+        if (!next || items.length < limit) break;
+        cursor = next;
+      }
 
-  console.log(`  Block ts: ${verdict.timestampIso}`);
-  console.log(`  From: ${verdict.fromStr}`);
-  console.log(`  To  : ${verdict.toStr}`);
-  console.log(`  Amount: ${verdict.amountFmt} ${symbol}`);
-  console.log(`  In window? ${verdict.inWindow ? "YES" : "NO"}`);
-  console.log(`  Owner match (ignoring subaccount): ${verdict.ownerMatch ? "YES" : "NO"}`);
-  console.log(`  Wallet considered: ${verdict.walletStr}`);
-  console.log(
-    `  Would current scanner emit? ${verdict.wouldEmit ? `YES (${verdict.direction})` : "NO"}${
-      !verdict.wouldEmit && verdict.ownerMatch && !verdict.direction
-        ? "  (owner matched but subaccount differs — set WALLET_SUBACCOUNT_HEX accordingly)"
-        : ""
-    }`
-  );
-}
+      if (transactions.length > 0) return transactions;
+    } catch {
+      // Fall through to v1
+    }
 
-async function sanityCheck_ICP(index: bigint) {
-  console.log(`\n[Sanity] ICP @ ${LEDGERS.ICP} index=${index.toString()}`);
-  const agent = new HttpAgent({ host: HOST });
-  const actor = makeIcpActor(agent, Principal.fromText(LEDGERS.ICP!));
-  const { symbol, decimals } = await getSymbolAndDecimals(actor, true);
+    // Fallback to v1 API with offset pagination
+    let offset = 0;
+    for (let iterations = 0; iterations < 1000; iterations++) {
+      const response = await http.getJsonFromBases<any>(`/accounts/${accountHex}/transactions`, {
+        sort_by: "-block_height",
+        limit,
+        offset,
+        start: startTime,
+        end: endTime,
+      });
 
-  const out = await fetchIcpBlocks(actor as any, agent, LEDGERS.ICP!, index, 1n, pLimit(2));
-  const hit = out.find((b) => b.index === index);
-  if (!hit) {
-    console.log("  -> Could not fetch that block (not found in main/archives).");
-    return;
-  }
-  const verdict = wouldCaptureIcpBlock(hit.block, ICP_ACCOUNT_ID_HEX, symbol, decimals);
+      const batch = (response.blocks ?? response.data ?? []) as IcpTx[];
+      transactions.push(...batch);
 
-  console.log(`  Block ts: ${verdict.timestampIso}`);
-  console.log(`  From: ${verdict.fromHex}`);
-  console.log(`  To  : ${verdict.toHex}`);
-  console.log(`  Amount: ${verdict.amountFmt} ${symbol}`);
-  console.log(`  In window? ${verdict.inWindow ? "YES" : "NO"}`);
-  console.log(
-    `  Would current scanner emit? ${
-      verdict.wouldEmit ? `YES (${verdict.direction})` : "NO"
-    }  (matching against ICP_ACCOUNT_ID_HEX=${ICP_ACCOUNT_ID_HEX.toLowerCase()})`
-  );
-}
+      if (batch.length === 0 || batch.length < limit) break;
+      offset += batch.length;
+    }
 
-async function sanityCheckKnownTxs(wallet: Account) {
-  console.log("=== Sanity Check: Known Transactions ===");
-  console.log(
-    `Date window: ${new Date(FROM_MS).toISOString()} .. ${new Date(TO_MS).toISOString()} | Wallet=${WALLET_PRINCIPAL} | Subaccount=${
-      wallet.subaccount ? bytesToHex(Uint8Array.from(wallet.subaccount)) : "(default)"
-    }`
-  );
-  await sanityCheck_ckBTC(VERIFY_CKBTC_INDEX, wallet);
-  await sanityCheck_ckUSDC(VERIFY_CKUSDC_INDEX, wallet);
-  await sanityCheck_ICP(VERIFY_ICP_INDEX);
-  console.log("=== End Sanity Check ===\n");
-}
+    return transactions;
+  },
 
-// ---------------- Main ----------------
-async function main() {
-  // Parse subaccount for wallet
-  const WALLET_SUBACCOUNT = (() => {
-    if (!WALLET_SUBACCOUNT_HEX) return null;
-    const b = hexToBytes(WALLET_SUBACCOUNT_HEX);
-    if (b.length === 0) return null;
-    if (b.length !== 32) {
-      console.warn(`WALLET_SUBACCOUNT_HEX must be 32 bytes (64 hex chars). Got ${b.length} bytes.`);
+  /**
+   * Fetch ICP transactions via global fallback (when account-scoped returns 0)
+   */
+  fetchGlobalFallback: async (
+    accountHex: string,
+    fromISO: string,
+    toISO: string,
+    pageSize: number
+  ): Promise<IcpTx[]> => {
+    const limit = Math.min(100, pageSize);
+    const startTime = Math.floor(new Date(fromISO).getTime() / 1000);
+    const endTime = Math.floor(new Date(toISO).getTime() / 1000);
+    const transactions: IcpTx[] = [];
+
+    // Helper to page through v2 global transactions
+    const fetchV2Global = async (params: Record<string, any>) => {
+      let cursor: string | undefined;
+      for (let iterations = 0; iterations < 1000; iterations++) {
+        const response = await http.getJsonFromBases<any>("/v2/transactions", {
+          sort_by: "-block_height",
+          limit,
+          created_at_start: startTime,
+          created_at_end: endTime,
+          ...(cursor ? { after: cursor } : {}),
+          ...params,
+        });
+
+        const items = (response?.blocks ??
+          response?.data ??
+          response?.transactions ??
+          []) as IcpTx[];
+        transactions.push(...items);
+
+        const next = response?.next_cursor ?? response?.next ?? response?.links?.next;
+        if (!next || items.length < limit) break;
+        cursor = next;
+      }
+    };
+
+    // Helper to page through v1 global transactions
+    const fetchV1Global = async (params: Record<string, any>) => {
+      let offset = 0;
+      for (let iterations = 0; iterations < 1000; iterations++) {
+        const response = await http.getJsonFromBases<any>("/transactions", {
+          sort_by: "-block_height",
+          limit,
+          offset,
+          start: startTime,
+          end: endTime,
+          ...params,
+        });
+
+        const batch = (response?.blocks ?? response?.data ?? []) as IcpTx[];
+        transactions.push(...batch);
+
+        if (batch.length === 0 || batch.length < limit) break;
+        offset += batch.length;
+      }
+    };
+
+    try {
+      // Try v2 first, both directions
+      const beforeFrom = transactions.length;
+      await fetchV2Global({ from_account: accountHex });
+      const fromCount = transactions.length - beforeFrom;
+
+      const beforeTo = transactions.length;
+      await fetchV2Global({ to_account: accountHex });
+      const toCount = transactions.length - beforeTo;
+
+      if (transactions.length > 0) {
+        console.log(
+          `    Global v2: found ${fromCount} from_account + ${toCount} to_account = ${transactions.length} total`
+        );
+        return transactions;
+      }
+    } catch {
+      // Fall through to v1
+    }
+
+    // Try v1 fallback
+    await fetchV1Global({ from_account: accountHex });
+    await fetchV1Global({ to_account: accountHex });
+
+    return transactions;
+  },
+
+  /**
+   * Fetch ICP transactions via Rosetta API
+   */
+  fetchViaRosetta: async (
+    accountHex: string,
+    fromISO: string,
+    toISO: string,
+    pageSize: number
+  ): Promise<IcpTx[]> => {
+    const limit = Math.min(100, pageSize);
+    const transactions: IcpTx[] = [];
+    let offset = 0;
+
+    for (let iterations = 0; iterations < 1000; iterations++) {
+      const result = await http.postRosetta<{
+        transactions: RosettaSearchTx[];
+        total_count: number;
+        next_offset?: number;
+      }>("/search/transactions", {
+        network_identifier: { blockchain: "Internet Computer", network: "00000000000000020101" },
+        account_identifier: { address: accountHex },
+        limit,
+        offset,
+      });
+
+      for (const rtx of result.transactions || []) {
+        // Extract timestamp
+        const tsNano = rtx.transaction.metadata?.timestamp;
+        const tsMs = tsNano ? Number(BigInt(tsNano) / BigInt(1_000_000)) : 0;
+        const timestamp = new Date(tsMs);
+
+        // Skip if outside date range
+        if (timestamp < new Date(fromISO) || timestamp > new Date(toISO)) {
+          continue;
+        }
+
+        // Extract from/to/amount from operations
+        let fromAddress = "";
+        let toAddress = "";
+        let amount = "0";
+
+        for (const op of rtx.transaction.operations) {
+          if (op.type !== "TRANSACTION" && op.type !== "TRANSFER") continue;
+
+          if (op.amount?.value?.startsWith("-")) {
+            fromAddress = op.account?.address || "";
+          } else if (op.amount?.value) {
+            toAddress = op.account?.address || "";
+            amount = op.amount.value;
+          }
+        }
+
+        transactions.push({
+          block_height: String(rtx.block_identifier.index),
+          block_hash: rtx.block_identifier.hash,
+          transaction_hash: rtx.transaction.transaction_identifier.hash,
+          transfer_type: "transfer",
+          amount,
+          from_account_identifier: fromAddress,
+          to_account_identifier: toAddress,
+          created_at: Math.floor(tsMs / 1000),
+          memo: String(rtx.transaction.metadata?.memo || ""),
+        });
+      }
+
+      if (!result.next_offset || result.transactions.length < limit) break;
+      offset = result.next_offset;
+    }
+
+    return transactions;
+  },
+};
+
+// ==================== ICRC Transaction Fetching ====================
+
+const icrcTransactions = {
+  /**
+   * Fetch ICRC transactions for an account
+   */
+  fetchByAccount: async (
+    ledger: string,
+    owner: string,
+    _subHex: string | undefined,
+    fromISO: string,
+    toISO: string,
+    pageSize: number
+  ): Promise<IcrcTx[]> => {
+    const limit = Math.min(100, pageSize);
+    const startTime = Math.floor(new Date(fromISO).getTime() / 1000);
+    const endTime = Math.floor(new Date(toISO).getTime() / 1000);
+    const meta = tokenMetadata[ledger] ?? { symbol: "TOKEN", decimals: 8 };
+    const transactions: IcrcTx[] = [];
+    let cursor: string | undefined;
+
+    for (let iterations = 0; iterations < 1000; iterations++) {
+      const response = await http.getJson<{ data: any[]; next_cursor?: string }>(
+        `${endpoints.icrc.v2}/ledgers/${ledger}/transactions`,
+        {
+          limit,
+          sort_by: "-index",
+          start: startTime,
+          end: endTime,
+          query: owner,
+          include_kind: "transfer",
+          ...(cursor ? { after: cursor } : {}),
+        }
+      );
+
+      for (const item of response.data || []) {
+        const timestamp = item?.created_at ?? item?.timestamp ?? "";
+        transactions.push({
+          id: String(item?.index ?? ""),
+          timestamp,
+          op: String(item?.kind ?? "").toLowerCase(),
+          from: item?.from_owner
+            ? {
+                owner: item.from_owner,
+                ...(item.from_subaccount ? { subaccount: item.from_subaccount } : {}),
+              }
+            : undefined,
+          to: item?.to_owner
+            ? {
+                owner: item.to_owner,
+                ...(item.to_subaccount ? { subaccount: item.to_subaccount } : {}),
+              }
+            : undefined,
+          amount: item?.amount ?? "0",
+          symbol: meta.symbol,
+          decimals: meta.decimals,
+          memo_hex: item?.memo ?? "",
+        });
+      }
+
+      if (!response.next_cursor || (response.data || []).length < limit) break;
+      cursor = response.next_cursor;
+    }
+
+    return transactions;
+  },
+
+  /**
+   * Get ICRC block by index (for sanity checks)
+   */
+  getBlockByIndex: async (
+    ledger: string,
+    index: bigint
+  ): Promise<{ id: string; timestamp: string; tx?: IcrcTx } | null> => {
+    const indexStr = index.toString();
+
+    // Try ICRC API first
+    try {
+      const response = await http.getJson<any>(
+        `${endpoints.icrc.v1}/ledgers/${ledger}/transactions/${indexStr}`
+      );
+
+      return {
+        id: response?.index?.toString() ?? indexStr,
+        timestamp: response?.timestamp ?? "",
+        tx: {
+          id: response?.index?.toString() ?? indexStr,
+          timestamp: response?.timestamp ?? "",
+          op: String(response?.kind ?? "").toLowerCase(),
+          from: response?.from_owner
+            ? {
+                owner: response.from_owner,
+                ...(response.from_subaccount ? { subaccount: response.from_subaccount } : {}),
+              }
+            : undefined,
+          to: response?.to_owner
+            ? {
+                owner: response.to_owner,
+                ...(response.to_subaccount ? { subaccount: response.to_subaccount } : {}),
+              }
+            : undefined,
+          amount: response?.amount ?? "0",
+          symbol: "TOKEN",
+          decimals: 8,
+          memo_hex: response?.memo ?? "",
+        },
+      };
+    } catch {
+      // Try Rosetta fallback if configured
+      if (!endpoints.rosetta.icrc) return null;
+
+      try {
+        const response = await fetch(`${endpoints.rosetta.icrc}/block`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            network_identifier: { blockchain: "Internet Computer", network: ledger },
+            block_identifier: { index: Number(index) },
+          }),
+        });
+
+        if (!response.ok) return null;
+
+        const data = await response.json();
+        const tsMs = Number(data?.block?.timestamp ?? 0) / 1_000_000;
+        const ops = data?.block?.transactions?.[0]?.operations ?? [];
+        const firstOp = ops[0] || {};
+        const opMeta = firstOp?.metadata || {};
+
+        return {
+          id: String(index),
+          timestamp: utils.toISO(tsMs),
+          tx: {
+            id: String(index),
+            timestamp: utils.toISO(tsMs),
+            op: String(firstOp?.type || opMeta?.op || "transfer"),
+            from: opMeta?.from
+              ? {
+                  owner: String(opMeta.from.owner),
+                  ...(opMeta.from.subaccount ? { subaccount: String(opMeta.from.subaccount) } : {}),
+                }
+              : undefined,
+            to: opMeta?.to
+              ? {
+                  owner: String(opMeta.to.owner),
+                  ...(opMeta.to.subaccount ? { subaccount: String(opMeta.to.subaccount) } : {}),
+                }
+              : undefined,
+            amount: opMeta?.amount ?? opMeta?.amt ?? "0",
+            symbol: opMeta?.symbol || "TOKEN",
+            decimals: opMeta?.decimals ?? 8,
+            memo_hex: opMeta?.memo_hex || "",
+          },
+        };
+      } catch {
+        return null;
+      }
+    }
+  },
+};
+
+// ==================== Block Fetching ====================
+
+const blockFetching = {
+  /**
+   * Get ICP block by index via Rosetta (for sanity checks)
+   */
+  getIcpBlockByIndex: async (
+    index: bigint
+  ): Promise<{
+    index: string;
+    timestamp: string;
+    op?: string;
+    from_hex?: string;
+    to_hex?: string;
+    amount_e8s?: string;
+    memo_hex?: string;
+  } | null> => {
+    if (!endpoints.rosetta.icp) return null;
+
+    try {
+      const response = await fetch(`${endpoints.rosetta.icp}/block`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          network_identifier: { blockchain: "Internet Computer", network: "00000000000000020101" },
+          block_identifier: { index: Number(index) },
+        }),
+      });
+
+      if (!response.ok) return null;
+
+      const data = await response.json();
+      const tsMs = Number(data?.block?.timestamp ?? 0) / 1_000_000;
+      const tx = data?.block?.transactions?.[0];
+      const ops = tx?.operations ?? [];
+      const transferOp = ops.find((o: any) => /transfer/i.test(o?.type || "")) || ops[0] || {};
+      const opMeta = transferOp?.metadata || {};
+
+      return {
+        index: String(index),
+        timestamp: utils.toISO(tsMs),
+        op: String(transferOp?.type || "Transfer"),
+        from_hex: opMeta?.from_account_identifier || opMeta?.from || "",
+        to_hex: opMeta?.to_account_identifier || opMeta?.to || "",
+        amount_e8s: opMeta?.amount_e8s || opMeta?.amount || "0",
+        memo_hex: opMeta?.memo_hex || "",
+      };
+    } catch {
       return null;
     }
-    return b;
-  })();
+  },
+};
 
-  const wallet: Account = {
-    owner: Principal.fromText(WALLET_PRINCIPAL),
-    subaccount: WALLET_SUBACCOUNT ?? null,
-  };
+// ==================== Account Matching ====================
 
-  // Always run sanity checks first
-  await sanityCheckKnownTxs(wallet);
+const matching = {
+  /**
+   * Compare two subaccount hex strings (treating empty/zero as equivalent)
+   */
+  equalSubaccounts: (a?: string, b?: string): boolean => {
+    const normA = utils.normalizeSubaccount(a);
+    const normB = utils.normalizeSubaccount(b);
+    return normA === normB;
+  },
 
-  console.log(`ICP Transaction Scanner`);
-  console.log(`================================`);
-  console.log(`Wallet Principal: ${WALLET_PRINCIPAL}`);
-  console.log(`ICP Account ID: ${ICP_ACCOUNT_ID_HEX}`);
-  console.log(
-    `Date window: ${new Date(FROM_MS).toISOString()} .. ${new Date(TO_MS).toISOString()}`
-  );
-  console.log(`Max blocks per ledger: ${MAX_BLOCKS_PER_LEDGER}`);
-  console.log(
-    `Parallelism: CONCURRENCY=${CONCURRENCY} ARCHIVE_CONCURRENCY=${ARCHIVE_CONCURRENCY} PAGE=${PAGE}`
-  );
-  console.log(`\n`);
+  /**
+   * Check if an ICRC account matches the wallet
+   */
+  matchesIcrcAccount: (
+    account: { owner?: string; subaccount?: string } | undefined,
+    walletOwner: string,
+    walletSubHex?: string
+  ): boolean => {
+    if (!account?.owner || account.owner !== walletOwner) return false;
+    if (!config.scanning.strictSubaccountMatch) return true;
+    return matching.equalSubaccounts(account.subaccount, walletSubHex);
+  },
 
-  ensureCsvHeader(OUT_CSV);
-  console.log(`CSV file: ${OUT_CSV} (appending rows as they're found)`);
-  console.log(`\n`);
+  /**
+   * Check if an ICRC transaction passes strict subaccount filter
+   */
+  passesStrictSubaccountFilter: (tx: IcrcTx, walletSubHex?: string): boolean => {
+    if (!config.scanning.strictSubaccountMatch || !walletSubHex) return true;
 
-  // Scan all ledgers in parallel
-  const perLedger = await Promise.all(
-    Object.entries(LEDGERS).map(async ([name, canisterId]) => {
-      console.log(`Scanning ${name} @ ${canisterId} ...`);
-      try {
-        let rows: CsvRow[];
-        if (name === "ICP") {
-          rows = await scanIcpLedger(canisterId, ICP_ACCOUNT_ID_HEX);
-        } else {
-          rows = await scanIcrcLedger(name, canisterId, wallet);
-        }
-        console.log(`  -> found ${rows.length} matching transactions\n`);
-        return rows;
-      } catch (e) {
-        console.error(`  Error scanning ${name}:`, e, "\n");
-        return [] as CsvRow[];
+    const normalizedWallet = utils.normalizeSubaccount(walletSubHex);
+    const fromMatches =
+      tx.from?.owner === config.wallet.principal &&
+      utils.normalizeSubaccount(tx.from?.subaccount) === normalizedWallet;
+    const toMatches =
+      tx.to?.owner === config.wallet.principal &&
+      utils.normalizeSubaccount(tx.to?.subaccount) === normalizedWallet;
+
+    return fromMatches || toMatches;
+  },
+};
+
+// ==================== CSV Mapping ====================
+
+const csvMapping = {
+  /**
+   * Convert ICP transaction to CSV row
+   */
+  fromIcpTransaction: (tx: IcpTx): CsvRow | null => {
+    const operation = (tx.transfer_type || "").toLowerCase();
+    const fromHex = (tx.from_account_identifier || "").toLowerCase();
+    const toHex = (tx.to_account_identifier || "").toLowerCase();
+    const accountIdHex = config.wallet.accountIdHex.toLowerCase();
+
+    let direction: Direction | null = null;
+    if (operation === "mint") {
+      direction = "mint";
+    } else if (operation === "burn") {
+      direction = "burn";
+    } else if (operation === "transfer") {
+      if (fromHex === accountIdHex && toHex === accountIdHex) {
+        direction = "self";
+      } else if (toHex === accountIdHex) {
+        direction = "inflow";
+      } else if (fromHex === accountIdHex) {
+        direction = "outflow";
       }
-    })
-  );
+    }
 
-  const all = perLedger.flat();
+    if (!direction) return null;
 
-  // Sort by date
-  all.sort((a, b) => (a.date_iso || "").localeCompare(b.date_iso || ""));
+    return {
+      date_iso: utils.toISO((tx.created_at ?? 0) * 1000), // seconds to ms
+      token: "ICP",
+      direction,
+      amount: utils.formatAmount(String(tx.amount ?? "0"), 8),
+      from_principal: fromHex,
+      to_principal: toHex,
+      block_index: String(tx.block_height),
+      memo: String((tx as any).icrc1_memo ?? tx.memo ?? "").toLowerCase(),
+    };
+  },
 
-  // Write CSV
-  console.log(`✅ Scan complete. Appended ${all.length} rows to ${OUT_CSV}`);
+  /**
+   * Convert ICRC transaction to CSV row
+   */
+  fromIcrcTransaction: (tx: IcrcTx): CsvRow | null => {
+    const operation = (tx.op || "").toLowerCase();
+    const isTransfer = ["transfer", "1xfer", "icrc1_transfer", "xfer"].includes(operation);
+
+    if (!isTransfer) return null;
+
+    let direction: Direction | null = null;
+    const fromMatches = matching.matchesIcrcAccount(tx.from, config.wallet.principal);
+    const toMatches = matching.matchesIcrcAccount(tx.to, config.wallet.principal);
+
+    if (fromMatches && toMatches) {
+      direction = "self";
+    } else if (toMatches) {
+      direction = "inflow";
+    } else if (fromMatches) {
+      direction = "outflow";
+    }
+
+    if (!direction) return null;
+
+    return {
+      date_iso: utils.toISO(tx.timestamp),
+      token: tx.symbol || "TOKEN",
+      direction,
+      amount: utils.formatAmount(String(tx.amount ?? "0"), tx.decimals ?? 8),
+      from_principal: tx.from?.owner || "",
+      to_principal: tx.to?.owner || "",
+      block_index: String(tx.id),
+      memo: (tx.memo_hex || "").toLowerCase(),
+    };
+  },
+};
+
+// ==================== Sanity Checks ====================
+
+const sanityChecks = {
+  /**
+   * Check a specific ICRC transaction
+   */
+  checkIcrcTransaction: async (
+    tokenName: string,
+    ledger: string,
+    index: bigint,
+    expectedDecimals: number
+  ) => {
+    console.log(`\n[Sanity] ${tokenName} @ ${ledger} index=${index}`);
+
+    const block = await icrcTransactions.getBlockByIndex(ledger, index);
+    if (!block?.tx) {
+      console.log("  -> Not found via Dashboard ICRC API; Rosetta not configured or also failed.");
+      return;
+    }
+
+    const tx = block.tx;
+    const fromMatches = matching.matchesIcrcAccount(
+      tx.from,
+      config.wallet.principal,
+      config.wallet.subaccountHex
+    );
+    const toMatches = matching.matchesIcrcAccount(
+      tx.to,
+      config.wallet.principal,
+      config.wallet.subaccountHex
+    );
+
+    let direction = "none";
+    if (fromMatches && toMatches) direction = "self";
+    else if (toMatches) direction = "inflow";
+    else if (fromMatches) direction = "outflow";
+    else direction = "mint";
+
+    console.log(`  Block ts: ${utils.toISO(tx.timestamp)}`);
+    console.log(`  From: ${tx.from?.owner || "-"} / sub=${tx.from?.subaccount || "(default)"}`);
+    console.log(`  To  : ${tx.to?.owner || "-"} / sub=${tx.to?.subaccount || "(default)"}`);
+    console.log(
+      `  Amount: ${utils.formatAmount(String(tx.amount ?? "0"), expectedDecimals)} ${tx.symbol || tokenName}`
+    );
+    console.log(`  Would emit? ${direction}`);
+  },
+
+  /**
+   * Check a specific ICP transaction
+   */
+  checkIcpTransaction: async (index: bigint) => {
+    console.log(`\n[Sanity] ICP @ ${config.ledgers.ICP} index=${index}`);
+
+    const block = await blockFetching.getIcpBlockByIndex(index);
+    if (!block) {
+      console.log("  -> Not found via Rosetta API.");
+      return;
+    }
+
+    const operation = (block.op || "").toLowerCase();
+    if (operation !== "transfer") {
+      console.log(`  Block ts: ${utils.toISO(block.timestamp)} | op=${block.op}`);
+      console.log("  Would emit? (non-transfer) mint/burn depends on op.");
+      return;
+    }
+
+    const fromHex = (block.from_hex || "").toLowerCase();
+    const toHex = (block.to_hex || "").toLowerCase();
+    const accountIdHex = config.wallet.accountIdHex.toLowerCase();
+
+    let direction = "none";
+    if (fromHex === accountIdHex && toHex === accountIdHex) direction = "self";
+    else if (toHex === accountIdHex) direction = "inflow";
+    else if (fromHex === accountIdHex) direction = "outflow";
+    else direction = "burn";
+
+    console.log(`  Block ts: ${utils.toISO(block.timestamp)}`);
+    console.log(`  From: ${fromHex || "-"}`);
+    console.log(`  To  : ${toHex || "-"}`);
+    console.log(`  Amount: ${utils.formatAmount(String(block.amount_e8s ?? "0"), 8)} ICP`);
+    console.log(`  Would emit? ${direction}`);
+  },
+
+  /**
+   * Run all sanity checks
+   */
+  runAll: async () => {
+    console.log("=== Sanity Check: Known Transactions ===");
+    console.log(
+      `Date window: ${config.scanning.startDate.toISOString()} .. ${config.scanning.endDate.toISOString()}`
+    );
+    console.log(`Wallet: ${config.wallet.principal}`);
+    console.log(
+      `STRICT_SUBACCOUNT_MATCH: ${config.scanning.strictSubaccountMatch ? "1 (exact)" : "0 (owner-only)"}`
+    );
+
+    await sanityChecks.checkIcrcTransaction(
+      "ckBTC",
+      config.ledgers.ckBTC,
+      config.verifyIndices.ckBTC,
+      8
+    );
+    await sanityChecks.checkIcrcTransaction(
+      "ckUSDC",
+      config.ledgers.ckUSDC,
+      config.verifyIndices.ckUSDC,
+      6
+    );
+    await sanityChecks.checkIcpTransaction(config.verifyIndices.ICP);
+
+    console.log("=== End Sanity Check ===\n");
+  },
+};
+
+// ==================== Main Scanner ====================
+
+const scanner = {
+  /**
+   * Scan ICP transactions
+   */
+  scanIcp: async (): Promise<number> => {
+    console.log(`Scanning ICP for ${config.wallet.accountIdHex} ...`);
+
+    let transactions: IcpTx[] = [];
+    const fromISO = config.scanning.startDate.toISOString();
+    const toISO = config.scanning.endDate.toISOString();
+
+    // Try Rosetta first if available
+    if (endpoints.rosetta.icp) {
+      try {
+        console.log(`  Trying Rosetta API first...`);
+        transactions = await icpTransactions.fetchViaRosetta(
+          config.wallet.accountIdHex,
+          fromISO,
+          toISO,
+          config.scanning.pageSize
+        );
+        console.log(`  -> Rosetta returned ${transactions.length} transactions`);
+      } catch (error) {
+        console.log(`  Rosetta failed, falling back to Dashboard API...\n${error}`);
+      }
+    }
+
+    // If Rosetta failed or returned nothing, try Dashboard API
+    if (transactions.length === 0) {
+      console.log(`  Using Dashboard API...`);
+
+      // Quick smoke test
+      try {
+        const smokeInbound = await http.getJsonFromBases<any>("/v2/transactions", {
+          sort_by: "-block_height",
+          limit: 1,
+          to_account: config.wallet.accountIdHex,
+        });
+        const smokeOutbound = await http.getJsonFromBases<any>("/v2/transactions", {
+          sort_by: "-block_height",
+          limit: 1,
+          from_account: config.wallet.accountIdHex,
+        });
+
+        const hasInbound = (smokeInbound?.blocks ?? smokeInbound?.data ?? []).length > 0;
+        const hasOutbound = (smokeOutbound?.blocks ?? smokeOutbound?.data ?? []).length > 0;
+        console.log(
+          `  Smoke test: has ANY ICP txs? inbound=${hasInbound}, outbound=${hasOutbound}`
+        );
+      } catch (error) {
+        console.log(`  Smoke test failed:`, error);
+      }
+
+      transactions = await icpTransactions.fetchByAccount(
+        config.wallet.accountIdHex,
+        fromISO,
+        toISO,
+        config.scanning.pageSize
+      );
+
+      if (transactions.length === 0) {
+        console.log(`  Account-scoped returned 0, trying global fallback...`);
+        transactions = await icpTransactions.fetchGlobalFallback(
+          config.wallet.accountIdHex,
+          fromISO,
+          toISO,
+          config.scanning.pageSize
+        );
+      }
+    }
+
+    // Convert to CSV and write
+    let count = 0;
+    for (const tx of transactions) {
+      const row = csvMapping.fromIcpTransaction(tx);
+      if (row) {
+        csv.appendRow(config.output.csvPath, row);
+        count++;
+      }
+    }
+
+    console.log(`  -> appended ${count} ICP rows\n`);
+    return count;
+  },
+
+  /**
+   * Scan ICRC token transactions
+   */
+  scanIcrcToken: async (name: string, ledger: string): Promise<number> => {
+    console.log(`Scanning ${name} via ICRC API @ ${ledger} for ${config.wallet.principal} ...`);
+
+    const transactions = await icrcTransactions.fetchByAccount(
+      ledger,
+      config.wallet.principal,
+      config.wallet.subaccountHex,
+      config.scanning.startDate.toISOString(),
+      config.scanning.endDate.toISOString(),
+      config.scanning.pageSize
+    );
+
+    let count = 0;
+    for (const tx of transactions) {
+      if (!matching.passesStrictSubaccountFilter(tx, config.wallet.subaccountHex)) continue;
+
+      const row = csvMapping.fromIcrcTransaction(tx);
+      if (row) {
+        csv.appendRow(config.output.csvPath, row);
+        count++;
+      }
+    }
+
+    console.log(`  -> appended ${count} ${name} rows\n`);
+    return count;
+  },
+
+  /**
+   * Run the complete scan
+   */
+  run: async () => {
+    console.log("ICP Transaction Scanner");
+    console.log("=======================");
+    console.log(`Wallet Principal: ${config.wallet.principal}`);
+    console.log(`ICP Account ID:  ${config.wallet.accountIdHex}`);
+    console.log(
+      `Date window:     ${config.scanning.startDate.toISOString()} .. ${config.scanning.endDate.toISOString()}`
+    );
+    console.log(`Strict Subaccount: ${config.scanning.strictSubaccountMatch ? "Yes" : "No"}`);
+    console.log("");
+
+    // Note about account ID verification
+    console.log("Note: To verify ICP_ACCOUNT_ID_HEX matches your principal, run:");
+    console.log(`  dfx ledger account-id --of-principal ${config.wallet.principal}`);
+    console.log("");
+
+    // Run sanity checks
+    await sanityChecks.runAll();
+
+    // Initialize CSV
+    csv.ensureHeader(config.output.csvPath);
+    console.log(`CSV file: ${config.output.csvPath} (appending rows as they're found)\n`);
+
+    // Run parallel scans
+    const tasks = Object.entries(config.ledgers).map(async ([name, ledger]) => {
+      try {
+        if (name === "ICP") {
+          return await scanner.scanIcp();
+        } else {
+          return await scanner.scanIcrcToken(name, ledger);
+        }
+      } catch (error) {
+        console.error(`  Error scanning ${name}:`, error, "\n");
+        return 0;
+      }
+    });
+
+    const counts = await Promise.all(tasks);
+    const total = counts.reduce((a, b) => a + b, 0);
+
+    console.log(`✅ Scan complete. Appended ${total} rows to ${config.output.csvPath}`);
+  },
+};
+
+// ==================== Entry Point ====================
+
+if (require.main === module) {
+  scanner.run().catch((error) => {
+    console.error("Scanner failed:", error);
+    process.exit(1);
+  });
 }
-
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
