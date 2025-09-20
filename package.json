@@ -1,0 +1,23 @@
+{
+  "name": "icp-flows",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@dfinity/agent": "^3.2.6",
+    "@dfinity/candid": "^3.2.6",
+    "@dfinity/principal": "^3.2.6"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.2"
+  },
+  "description": ""
+}
