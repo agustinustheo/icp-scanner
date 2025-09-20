@@ -58,7 +58,7 @@ const FROM_TS = BigInt(FROM_MS) * 1_000_000n; // nanoseconds
 const TO_TS = BigInt(TO_MS) * 1_000_000n;
 
 // Tuning knobs
-const MAX_BLOCKS_PER_LEDGER = envNum("MAX_BLOCKS_PER_LEDGER", 4_000_000, 1);
+const MAX_BLOCKS_PER_LEDGER = envNum("MAX_BLOCKS_PER_LEDGER", 7_000_000, 1);
 const PAGE = envNum("PAGE", 1000, 1);
 const PROGRESS_EVERY = envNum("PROGRESS_EVERY", 50, 1);
 
@@ -470,13 +470,13 @@ function makeIcrc3Actor(agent: HttpAgent, canisterId: string | Principal) {
   return Actor.createActor(ICRC3_IDL as any, { agent, canisterId });
 }
 
-// Dynamic archive actor for ICRC-3 with a specific method name (e.g., "get_blocks" or "icrc3_get_blocks")
 function makeIcrc3ArchiveActor(
   agent: HttpAgent,
   canisterId: string | Principal,
-  methodName?: string
+  methodName: string,
+  returnsVariant = false
 ) {
-  const ArchiveIDL = ({ IDL }: { IDL: typeof import("@dfinity/candid").IDL }) => {
+  const ArchiveIDL = ({ IDL }: any) => {
     const Value = IDL.Rec();
     Value.fill(
       IDL.Variant({
@@ -502,8 +502,13 @@ function makeIcrc3ArchiveActor(
         ),
       })
     );
+
+    const Ret = returnsVariant
+      ? IDL.Variant({ Ok: GetBlocksResult, Err: IDL.Text }) // loose Err keeps us flexible
+      : GetBlocksResult;
+
     return IDL.Service({
-      [methodName || "icrc3_get_blocks"]: IDL.Func([GetBlocksArgs], [GetBlocksResult], ["query"]),
+      [methodName]: IDL.Func([GetBlocksArgs], [Ret], ["query"]),
     });
   };
   return Actor.createActor(ArchiveIDL as any, { agent, canisterId });
@@ -629,6 +634,7 @@ async function fetchIcpBlocks(
 }
 
 type IcrcFetched = { id: bigint; block: any };
+
 async function fetchIcrc3Blocks(
   actor: any,
   agent: HttpAgent,
@@ -638,47 +644,72 @@ async function fetchIcrc3Blocks(
   limitArchive: ReturnType<typeof pLimit>
 ): Promise<IcrcFetched[]> {
   const out: IcrcFetched[] = [];
+
+  // Helper to push blocks handling any bigint-ish ids
+  const pushBlocks = (arr: Array<{ id: any; block: any }>) => {
+    for (const b of arr || []) out.push({ id: BigInt(b.id), block: b.block });
+  };
+
+  // Main call
   const res = await actor.icrc3_get_blocks([{ start, length }]);
-  const blocks = (res?.blocks || []) as Array<{ id: bigint; block: any }>;
-  out.push(...blocks);
+  if (VERBOSE_FETCH) {
+    const mainN = Array.isArray(res?.blocks) ? res.blocks.length : 0;
+    const archN = Array.isArray(res?.archived_blocks) ? res.archived_blocks.length : 0;
+    console.log(
+      `[fetch][ICRC3] ${start}..${start + length - 1n} main=${mainN} archEntries=${archN}`
+    );
+  }
+  pushBlocks(res?.blocks);
 
   const archived = (res?.archived_blocks || []) as Array<{
     args: Array<{ start: bigint; length: bigint }>;
     callback: [Principal, string];
   }>;
 
-  if (VERBOSE_FETCH) {
-    console.log(
-      `[fetch][ICRC3] ${start}..${start + length - 1n} main=${blocks.length} archEntries=${archived.length}`
-    );
-  }
-
+  // Fetch archives with the EXACT callback method
   await Promise.all(
     archived.flatMap((ai) => {
-      const [cbPrin, cbMethod] = ai.callback ?? [];
-      const archiveActor = makeIcrc3ArchiveActor(agent, cbPrin, cbMethod);
-      const methodName = (cbMethod || "icrc3_get_blocks") as "icrc3_get_blocks";
+      const [cbPrin, cbMethodRaw] = ai.callback || [];
+      const cbMethod =
+        typeof cbMethodRaw === "string" && cbMethodRaw.length ? cbMethodRaw : "icrc3_get_blocks";
+
       return ai.args.map((argsEntry) =>
         limitArchive(async () => {
+          // try plain return
           try {
-            const r = await (archiveActor as any)[cbMethod || methodName]([argsEntry]);
-            const aBlocks = (r?.blocks || []) as Array<{ id: bigint; block: any }>;
+            const a1 = makeIcrc3ArchiveActor(agent, cbPrin, cbMethod, false);
+            const r1 = await (a1 as any)[cbMethod]([argsEntry]);
+            const aBlocks = (r1?.blocks || []) as Array<{ id: any; block: any }>;
+
             if (VERBOSE_FETCH) {
               console.log(
-                `  [fetch-arch][ICRC3] ${String(argsEntry.start)}..${String(
-                  argsEntry.start + argsEntry.length - 1n
-                )} method=${cbMethod || "icrc3_get_blocks"} blocks=${aBlocks.length}`
+                `  [fetch-arch][ICRC3] ${String(cbPrin)}.${cbMethod} ` +
+                  `[${argsEntry.start}..${argsEntry.start + argsEntry.length - 1n}] blocks=${aBlocks.length}`
               );
             }
-            out.push(...aBlocks);
-          } catch (e) {
-            if (VERBOSE_FETCH) {
+            pushBlocks(aBlocks);
+          } catch (ePlain) {
+            // fallback: variant { Ok, Err }
+            try {
+              const a2 = makeIcrc3ArchiveActor(agent, cbPrin, cbMethod, true);
+              const r2 = await (a2 as any)[cbMethod]([argsEntry]);
+              const ok = r2 && (r2.Ok || r2.ok) ? r2.Ok || r2.ok : r2;
+              const aBlocks = (ok?.blocks || []) as Array<{ id: any; block: any }>;
+
+              if (VERBOSE_FETCH) {
+                console.log(
+                  `  [fetch-arch][ICRC3] ${String(cbPrin)}.${cbMethod} ` +
+                    `[${argsEntry.start}..${argsEntry.start + argsEntry.length - 1n}] blocks=${aBlocks.length} (variant)`,
+                  ePlain
+                );
+              }
+              pushBlocks(aBlocks);
+            } catch (eVar) {
               console.warn(
-                `  [fetch-arch][ICRC3] ERROR method=${cbMethod} on ${cbPrin.toText()}:`,
-                e
+                `  [fetch-arch][ICRC3] ${String(cbPrin)}.${cbMethod} failed (both sigs).`,
+                eVar
               );
             }
-            // swallow archive errors so the segment can proceed
           }
         })
       );
