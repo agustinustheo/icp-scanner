@@ -48,6 +48,11 @@ const LEDGERS: Record<string, string> = {
   ckUSDT: envStr("CKUSDT_LEDGER", "cngnf-vqaaa-aaaar-qag4q-cai"),
 };
 
+// Match behavior for ICRC tokens:
+//  - STRICT_SUBACCOUNT_MATCH=1  -> owner+subaccount must match exactly
+//  - STRICT_SUBACCOUNT_MATCH=0  -> match by owner only (captures all your subaccounts)
+const STRICT_SUBACCOUNT_MATCH = envNum("STRICT_SUBACCOUNT_MATCH", 0, 0) > 0;
+
 // Time window (inclusive). Defaults to START=2025-06-01T00:00:00Z and END=now.
 const START_DATE = envDate("START_DATE", "2025-06-01T00:00:00Z");
 const END_DATE = envDate("END_DATE", new Date().toISOString());
@@ -410,6 +415,13 @@ function eqAccount(a: Account | null, b: Account): boolean {
   return true;
 }
 
+// Matching helper honoring STRICT_SUBACCOUNT_MATCH
+function accountMatches(a: Account | null, b: Account, strict: boolean): boolean {
+  if (!a) return false;
+  if (a.owner.toText() !== b.owner.toText()) return false;
+  return strict ? eqAccount(a, b) : true;
+}
+
 function formatAmount(raw: string, decimals: number): string {
   const s = raw.replace(/^0+/, "") || "0";
   if (decimals <= 0) return s;
@@ -666,50 +678,55 @@ async function fetchIcrc3Blocks(
     callback: [Principal, string];
   }>;
 
-  // Fetch archives with the EXACT callback method
+  // Fetch archives with multiple method/signature fallbacks on the same archive canister.
   await Promise.all(
     archived.flatMap((ai) => {
       const [cbPrin, cbMethodRaw] = ai.callback || [];
       const cbMethod =
         typeof cbMethodRaw === "string" && cbMethodRaw.length ? cbMethodRaw : "icrc3_get_blocks";
 
+      const tries: Array<{ name: string; variant: boolean }> = [
+        { name: cbMethod, variant: false },
+        { name: cbMethod, variant: true },
+        { name: "get_blocks", variant: false },
+        { name: "get_blocks", variant: true },
+        { name: "icrc3_get_blocks", variant: false },
+        { name: "icrc3_get_blocks", variant: true },
+      ];
+
       return ai.args.map((argsEntry) =>
         limitArchive(async () => {
-          // try plain return
-          try {
-            const a1 = makeIcrc3ArchiveActor(agent, cbPrin, cbMethod, false);
-            const r1 = await (a1 as any)[cbMethod]([argsEntry]);
-            const aBlocks = (r1?.blocks || []) as Array<{ id: any; block: any }>;
-
-            if (VERBOSE_FETCH) {
-              console.log(
-                `  [fetch-arch][ICRC3] ${String(cbPrin)}.${cbMethod} ` +
-                  `[${argsEntry.start}..${argsEntry.start + argsEntry.length - 1n}] blocks=${aBlocks.length}`
-              );
-            }
-            pushBlocks(aBlocks);
-          } catch (ePlain) {
-            // fallback: variant { Ok, Err }
+          let fetched = false;
+          let lastErr: unknown = null;
+          for (const t of tries) {
             try {
-              const a2 = makeIcrc3ArchiveActor(agent, cbPrin, cbMethod, true);
-              const r2 = await (a2 as any)[cbMethod]([argsEntry]);
-              const ok = r2 && (r2.Ok || r2.ok) ? r2.Ok || r2.ok : r2;
+              const a = makeIcrc3ArchiveActor(agent, cbPrin, t.name, t.variant);
+              const r = await (a as any)[t.name]([argsEntry]);
+              const ok = r && (r.Ok || r.ok) ? r.Ok || r.ok : r;
               const aBlocks = (ok?.blocks || []) as Array<{ id: any; block: any }>;
-
-              if (VERBOSE_FETCH) {
-                console.log(
-                  `  [fetch-arch][ICRC3] ${String(cbPrin)}.${cbMethod} ` +
-                    `[${argsEntry.start}..${argsEntry.start + argsEntry.length - 1n}] blocks=${aBlocks.length} (variant)`,
-                  ePlain
-                );
+              if (Array.isArray(aBlocks)) {
+                if (VERBOSE_FETCH) {
+                  console.log(
+                    `  [fetch-arch][ICRC3] ${String(cbPrin)}.${t.name} ` +
+                      `[${argsEntry.start}..${argsEntry.start + argsEntry.length - 1n}] blocks=${aBlocks.length}` +
+                      (t.variant ? " (variant)" : "")
+                  );
+                }
+                pushBlocks(aBlocks);
+                fetched = true;
+                break;
               }
-              pushBlocks(aBlocks);
-            } catch (eVar) {
-              console.warn(
-                `  [fetch-arch][ICRC3] ${String(cbPrin)}.${cbMethod} failed (both sigs).`,
-                eVar
-              );
+            } catch (e) {
+              lastErr = e;
             }
+          }
+          if (!fetched && VERBOSE_FETCH) {
+            console.warn(
+              `  [fetch-arch][ICRC3] ${String(cbPrin)} candid fallbacks failed for ` +
+                `[${argsEntry.start}..${argsEntry.start + argsEntry.length - 1n}] (callback "${cbMethod}"). ` +
+                `Archive may be protobuf-only.`,
+              lastErr
+            );
           }
         })
       );
@@ -749,11 +766,6 @@ async function getSymbolAndDecimals(
 }
 
 // ---------------- Parallel scanners (using reusable fetchers) ----------------
-function isIcrcTransferOp(opStr: string): boolean {
-  const s = opStr.toLowerCase();
-  return s === "xfer" || s === "transfer" || s === "1xfer" || s === "icrc1_transfer";
-}
-
 async function scanIcpLedger(canisterId: string, icpAccountIdHex: string): Promise<CsvRow[]> {
   const targetHex = icpAccountIdHex.toLowerCase();
   const agent = new HttpAgent({ host: HOST });
@@ -908,6 +920,7 @@ async function scanIcrcLedger(
   let blocksSeen = 0;
   let matches = 0;
 
+  // Support flat and nested ICRC-1/3 shapes; emit transfer/mint/burn.
   function handleIcrcBlock(bw: { id: bigint; block: any }) {
     const block = bw.block;
     const ts = extractNat(extractValue(block, "ts"));
@@ -916,22 +929,74 @@ async function scanIcrcLedger(
     const tx = extractValue(block, "tx");
     if (!tx || !(tx as any).Map) return;
 
-    const opType =
+    const opRaw =
       extractText(extractValue(tx, "op")) ||
       extractText(extractValue(block, "btype")) ||
-      extractText(extractValue(block, "type"));
-    if (!isIcrcTransferOp(opType)) return;
+      extractText(extractValue(block, "type")) ||
+      "";
+    const op = opRaw.toLowerCase();
 
-    const from = extractAccount(extractValue(tx, "from"));
-    const to = extractAccount(extractValue(tx, "to"));
-    const amount = extractNat(extractValue(tx, "amt")).toString();
-    const memo = toHex(new Uint8Array(extractBlob(extractValue(tx, "memo"))));
+    const nestedTransfer = extractValue(tx, "transfer");
+    const nestedMint = extractValue(tx, "mint");
+    const nestedBurn = extractValue(tx, "burn");
+    const readAmt = (v: unknown) => {
+      const a = extractNat(extractValue(v, "amt"));
+      const amount = a > 0n ? a : extractNat(extractValue(v, "amount"));
+      return amount.toString();
+    };
+
+    let kind: "transfer" | "mint" | "burn" | "" = "";
+    let from: Account | null = null;
+    let to: Account | null = null;
+    let amount = "0";
+    let memo = "";
+
+    if (nestedTransfer && (nestedTransfer as any).Map) {
+      kind = "transfer";
+      from = extractAccount(extractValue(nestedTransfer, "from"));
+      to = extractAccount(extractValue(nestedTransfer, "to"));
+      amount = readAmt(nestedTransfer);
+      memo = toHex(new Uint8Array(extractBlob(extractValue(nestedTransfer, "memo"))));
+    } else if (nestedMint && (nestedMint as any).Map) {
+      kind = "mint";
+      to = extractAccount(extractValue(nestedMint, "to"));
+      amount = readAmt(nestedMint);
+      memo = toHex(new Uint8Array(extractBlob(extractValue(nestedMint, "memo"))));
+    } else if (nestedBurn && (nestedBurn as any).Map) {
+      kind = "burn";
+      from = extractAccount(extractValue(nestedBurn, "from"));
+      amount = readAmt(nestedBurn);
+      memo = toHex(new Uint8Array(extractBlob(extractValue(nestedBurn, "memo"))));
+    } else {
+      // Flat fallback (typed ICRC-3 blocks frequently use this).
+      const flatFrom = extractAccount(extractValue(tx, "from"));
+      const flatTo = extractAccount(extractValue(tx, "to"));
+      const flatAmt = extractNat(extractValue(tx, "amt")) || extractNat(extractValue(tx, "amount"));
+      const flatMemo = toHex(new Uint8Array(extractBlob(extractValue(tx, "memo"))));
+      if (flatAmt > 0n) {
+        amount = flatAmt.toString();
+        from = flatFrom;
+        to = flatTo;
+        memo = flatMemo;
+        if (op.includes("xfer") || op.includes("transfer")) kind = "transfer";
+        else if (op.includes("mint")) kind = "mint";
+        else if (op.includes("burn")) kind = "burn";
+        else if (from && to) kind = "transfer"; // heuristic when op missing
+      }
+    }
+    if (!kind) return;
 
     let direction: CsvRow["direction"] | null = null;
-    if (from && to) {
-      if (eqAccount(from, wallet) && eqAccount(to, wallet)) direction = "self";
-      else if (eqAccount(to, wallet)) direction = "inflow";
-      else if (eqAccount(from, wallet)) direction = "outflow";
+    if (kind === "transfer") {
+      const fromMatch = accountMatches(from, wallet, STRICT_SUBACCOUNT_MATCH);
+      const toMatch = accountMatches(to, wallet, STRICT_SUBACCOUNT_MATCH);
+      if (fromMatch && toMatch) direction = "self";
+      else if (toMatch) direction = "inflow";
+      else if (fromMatch) direction = "outflow";
+    } else if (kind === "mint") {
+      if (accountMatches(to, wallet, STRICT_SUBACCOUNT_MATCH)) direction = "mint";
+    } else if (kind === "burn") {
+      if (accountMatches(from, wallet, STRICT_SUBACCOUNT_MATCH)) direction = "burn";
     }
     if (!direction) return;
 
@@ -1062,22 +1127,66 @@ function wouldCaptureIcrc3Block(
 
   const tx = extractValue(block, "tx");
   if (tx && (tx as any).Map) {
-    const opType =
+    const opRaw =
       extractText(extractValue(tx, "op")) ||
       extractText(extractValue(block, "btype")) ||
-      extractText(extractValue(block, "type"));
+      extractText(extractValue(block, "type")) ||
+      "";
+    const op = opRaw.toLowerCase();
 
-    if (isIcrcTransferOp(opType)) {
-      from = extractAccount(extractValue(tx, "from"));
-      to = extractAccount(extractValue(tx, "to"));
-      amount = extractNat(extractValue(tx, "amt")).toString();
-      memo = toHex(new Uint8Array(extractBlob(extractValue(tx, "memo"))));
+    const nestedTransfer = extractValue(tx, "transfer");
+    const nestedMint = extractValue(tx, "mint");
+    const nestedBurn = extractValue(tx, "burn");
+    const readAmt = (v: unknown) => {
+      const a = extractNat(extractValue(v, "amt"));
+      const aa = a > 0n ? a : extractNat(extractValue(v, "amount"));
+      return aa.toString();
+    };
 
-      if (from && to) {
-        if (eqAccount(from, wallet) && eqAccount(to, wallet)) direction = "self";
-        else if (eqAccount(to, wallet)) direction = "inflow";
-        else if (eqAccount(from, wallet)) direction = "outflow";
+    let kind: "transfer" | "mint" | "burn" | "" = "";
+    if (nestedTransfer && (nestedTransfer as any).Map) {
+      kind = "transfer";
+      from = extractAccount(extractValue(nestedTransfer, "from"));
+      to = extractAccount(extractValue(nestedTransfer, "to"));
+      amount = readAmt(nestedTransfer);
+      memo = toHex(new Uint8Array(extractBlob(extractValue(nestedTransfer, "memo"))));
+    } else if (nestedMint && (nestedMint as any).Map) {
+      kind = "mint";
+      to = extractAccount(extractValue(nestedMint, "to"));
+      amount = readAmt(nestedMint);
+      memo = toHex(new Uint8Array(extractBlob(extractValue(nestedMint, "memo"))));
+    } else if (nestedBurn && (nestedBurn as any).Map) {
+      kind = "burn";
+      from = extractAccount(extractValue(nestedBurn, "from"));
+      amount = readAmt(nestedBurn);
+      memo = toHex(new Uint8Array(extractBlob(extractValue(nestedBurn, "memo"))));
+    } else {
+      const flatFrom = extractAccount(extractValue(tx, "from"));
+      const flatTo = extractAccount(extractValue(tx, "to"));
+      const flatAmt = extractNat(extractValue(tx, "amt")) || extractNat(extractValue(tx, "amount"));
+      const flatMemo = toHex(new Uint8Array(extractBlob(extractValue(tx, "memo"))));
+      if (flatAmt > 0n) {
+        amount = flatAmt.toString();
+        from = flatFrom;
+        to = flatTo;
+        memo = flatMemo;
+        if (op.includes("xfer") || op.includes("transfer")) kind = "transfer";
+        else if (op.includes("mint")) kind = "mint";
+        else if (op.includes("burn")) kind = "burn";
+        else if (from && to) kind = "transfer";
       }
+    }
+
+    if (kind === "transfer") {
+      const fromMatch = accountMatches(from, wallet, STRICT_SUBACCOUNT_MATCH);
+      const toMatch = accountMatches(to, wallet, STRICT_SUBACCOUNT_MATCH);
+      if (fromMatch && toMatch) direction = "self";
+      else if (toMatch) direction = "inflow";
+      else if (fromMatch) direction = "outflow";
+    } else if (kind === "mint") {
+      if (accountMatches(to, wallet, STRICT_SUBACCOUNT_MATCH)) direction = "mint";
+    } else if (kind === "burn") {
+      if (accountMatches(from, wallet, STRICT_SUBACCOUNT_MATCH)) direction = "burn";
     }
   }
 
