@@ -1,5 +1,5 @@
 /**
- * Unified ICP Transaction Scanner
+ * ICP Transaction Scanner
  * Scans ICP, ckBTC, ckUSDC, and ckUSDT with June 2025 cutoff
  */
 
@@ -83,7 +83,13 @@ const ICP_LEDGER_IDL = ({ IDL }: { IDL: typeof import("@dfinity/candid").IDL }) 
 
   const QueryBlocksResponse = IDL.Rec();
 
-  const QueryArchiveFn = IDL.Func([GetBlocksArgs], [QueryBlocksResponse], ["query"]);
+  const BlockRange = IDL.Record({ blocks: IDL.Vec(Block) });
+  const QueryArchiveError = IDL.Variant({
+    BadFirstBlockIndex: IDL.Record({ requested_index: BlockIndex, first_valid_index: BlockIndex }),
+    Other: IDL.Record({ error_code: IDL.Nat64, error_message: IDL.Text }),
+  });
+  const QueryArchiveResult = IDL.Variant({ Ok: BlockRange, Err: QueryArchiveError });
+  const QueryArchiveFn = IDL.Func([GetBlocksArgs], [QueryArchiveResult], ["query"]);
 
   const ArchivedBlockRange = IDL.Record({
     start: BlockIndex,
@@ -103,8 +109,8 @@ const ICP_LEDGER_IDL = ({ IDL }: { IDL: typeof import("@dfinity/candid").IDL }) 
 
   return IDL.Service({
     query_blocks: IDL.Func([GetBlocksArgs], [QueryBlocksResponse], ["query"]),
-    symbol: IDL.Func([], [IDL.Text], ["query"]),
-    decimals: IDL.Func([], [IDL.Nat32], ["query"]),
+    symbol: IDL.Func([], [IDL.Record({ symbol: IDL.Text })], ["query"]),
+    decimals: IDL.Func([], [IDL.Record({ decimals: IDL.Nat32 })], ["query"]),
   });
 };
 
@@ -297,9 +303,12 @@ async function getSymbolAndDecimals(
   let decimals = 0;
   try {
     if (isIcp) {
-      const icpActor = actor as { symbol: () => Promise<string>; decimals: () => Promise<number> };
-      symbol = await icpActor.symbol();
-      decimals = Number(await icpActor.decimals());
+      const icpActor = actor as {
+        symbol: () => Promise<{ symbol: string }>;
+        decimals: () => Promise<{ decimals: number }>;
+      };
+      symbol = (await icpActor.symbol()).symbol;
+      decimals = Number((await icpActor.decimals()).decimals);
     } else {
       const icrcActor = actor as unknown as {
         icrc1_symbol: () => Promise<string>;
@@ -315,11 +324,7 @@ async function getSymbolAndDecimals(
 }
 
 // ---------- ICP Ledger Scanner ----------
-async function scanIcpLedger(
-  canisterId: string,
-  walletPrincipal: string,
-  icpAccountIdHex: string
-): Promise<CsvRow[]> {
+async function scanIcpLedger(canisterId: string, icpAccountIdHex: string): Promise<CsvRow[]> {
   const agent = new HttpAgent({ host: HOST });
   const actor = Actor.createActor(ICP_LEDGER_IDL as any, { agent, canisterId });
 
@@ -373,11 +378,18 @@ async function scanIcpLedger(
 
         const date_iso = timestamp ? new Date(timestamp).toISOString() : "";
 
-        const tx = (block as { transaction?: unknown }).transaction as { operation?: Record<string, unknown>; memo?: unknown };
+        const tx = (block as { transaction?: unknown }).transaction as {
+          operation?: Record<string, unknown>;
+          memo?: unknown;
+        };
         if (!tx.operation) continue;
         const opKey = Object.keys(tx.operation)[0];
         if (!opKey) continue;
-        const op = tx.operation[opKey] as { from?: number[]; to?: number[]; amount?: { e8s?: bigint } };
+        const op = tx.operation[opKey] as {
+          from?: number[];
+          to?: number[];
+          amount?: { e8s?: bigint };
+        };
 
         if (opKey === "Transfer") {
           const fromHex = accountIdToHex(op.from || []);
@@ -409,130 +421,133 @@ async function scanIcpLedger(
         }
       }
 
-      // Process archived blocks (commenting out for now as ICP archive format varies)
-      /*
-      for (const range of res.archived_blocks ?? []) {
+      // Process archived blocks
+      for (const range of (res as any).archived_blocks ?? []) {
         if (scanned >= MAX_BLOCKS_PER_LEDGER) break;
-        
-        const [archiveCanister, method] = range.callback as [Principal, string];
-        
-        // ICP Archive IDL
+
+        // In JS, candid 'func' decodes to [principal, method]
+        const [archiveCanister, method] = (range.callback ?? []) as [Principal, string];
+
+        // Minimal archive IDL: callback returns QueryArchiveResult (Ok/Err)
         const ArchiveIDL = ({ IDL }: any) => {
+          // Re-define block types for archive
           const AccountIdentifier = IDL.Vec(IDL.Nat8);
           const Tokens = IDL.Record({ e8s: IDL.Nat64 });
           const Memo = IDL.Nat64;
           const TimeStamp = IDL.Record({ timestamp_nanos: IDL.Nat64 });
           const BlockIndex = IDL.Nat64;
-          
+
           const Transfer = IDL.Record({
             from: AccountIdentifier,
             to: AccountIdentifier,
             amount: Tokens,
             fee: Tokens,
           });
-          
+
           const Mint = IDL.Record({
             to: AccountIdentifier,
             amount: Tokens,
           });
-          
+
           const Burn = IDL.Record({
             from: AccountIdentifier,
             amount: Tokens,
           });
-          
+
           const Operation = IDL.Variant({
             Transfer: Transfer,
             Mint: Mint,
             Burn: Burn,
           });
-          
+
           const Transaction = IDL.Record({
             operation: Operation,
             memo: Memo,
             created_at_time: TimeStamp,
           });
-          
+
           const Block = IDL.Record({
             parent_hash: IDL.Opt(IDL.Vec(IDL.Nat8)),
             transaction: Transaction,
             timestamp: TimeStamp,
           });
-          
+
           return IDL.Service({
-            get_blocks: IDL.Func(
+            [method || "get_blocks"]: IDL.Func(
               [IDL.Record({ start: IDL.Nat64, length: IDL.Nat64 })],
-              [IDL.Record({
-                blocks: IDL.Vec(Block),
-                first_block_index: BlockIndex,
-                chain_length: IDL.Nat64,
-                certificate: IDL.Opt(IDL.Vec(IDL.Nat8))
-              })],
+              [
+                IDL.Variant({
+                  Ok: IDL.Record({ blocks: IDL.Vec(Block) }),
+                  Err: IDL.Variant({
+                    BadFirstBlockIndex: IDL.Record({
+                      requested_index: BlockIndex,
+                      first_valid_index: BlockIndex,
+                    }),
+                    Other: IDL.Record({ error_code: IDL.Nat64, error_message: IDL.Text }),
+                  }),
+                }),
+              ],
               ["query"]
-            )
+            ),
           });
         };
-        
-        try {
-          const archiveActor = Actor.createActor(ArchiveIDL as any, { 
-            agent, 
-            canisterId: archiveCanister.toText() 
-          });
-          const archiveRes = await (archiveActor as any)[method || "get_blocks"]({
-            start: range.start,
-            length: range.length
-          });
-          
-          for (let i = 0; i < archiveRes.blocks.length && scanned < MAX_BLOCKS_PER_LEDGER; i++) {
-            const block = archiveRes.blocks[i];
-            const blockIndex = archiveRes.first_block_index + BigInt(i);
-            const timestamp = n64ToMillis((block as { timestamp?: unknown }).timestamp);
-            
-            // Check cutoff date
-            if (timestamp && timestamp > CUTOFF_DATE.getTime()) continue;
-            
-            const date_iso = timestamp ? new Date(timestamp).toISOString() : "";
-            
-            const tx = (block as { transaction?: unknown }).transaction as { operation?: Record<string, unknown>; memo?: unknown };
-            const opKey = Object.keys(tx.operation)[0];
-            if (!opKey) continue;
-            const op = tx.operation[opKey];
-            
-            if (opKey === "Transfer") {
-              const fromHex = accountIdToHex(op.from);
-              const toHex = accountIdToHex(op.to);
-              const amount = op.amount.e8s.toString();
-              const memo = memoToHex(tx.memo);
-              
-              let direction: CsvRow["direction"] | null = null;
-              
-              const matchesFrom = fromHex === icpAccountIdHex;
-              const matchesTo = toHex === icpAccountIdHex;
-              
-              if (matchesFrom && matchesTo) direction = "self";
-              else if (matchesTo) direction = "inflow";
-              else if (matchesFrom) direction = "outflow";
-              
-              if (direction) {
-                rows.push({
-                  date_iso,
-                  token: symbol,
-                  direction,
-                  amount: formatAmount(amount, decimals),
-                  from_principal: "", 
-                  to_principal: "",
-                  block_index: blockIndex.toString(),
-                  memo,
-                });
-              }
-            }
-            scanned++;
+
+        const archive = Actor.createActor(ArchiveIDL as any, {
+          agent,
+          canisterId: archiveCanister,
+        });
+        const r = await (archive as any)[method || "get_blocks"]({
+          start: range.start,
+          length: range.length,
+        });
+
+        const ok = (r && (r.Ok || r.ok)) as { blocks: any[] } | undefined;
+        if (!ok) continue;
+
+        for (let i = 0; i < ok.blocks.length && scanned < MAX_BLOCKS_PER_LEDGER; i++) {
+          const block = ok.blocks[i];
+          const blockIndex = BigInt(range.start) + BigInt(i); // start+i per spec
+          const timestamp = n64ToMillis((block as any).timestamp);
+          if (timestamp && timestamp > CUTOFF_DATE.getTime()) continue;
+
+          const date_iso = timestamp ? new Date(timestamp).toISOString() : "";
+          const tx = (block as any).transaction as {
+            operation?: Record<string, unknown>;
+            memo?: unknown;
+          };
+          const opKey = tx?.operation && Object.keys(tx.operation)[0];
+          if (opKey !== "Transfer") continue;
+
+          const op = (tx.operation as any)[opKey] as {
+            from?: number[];
+            to?: number[];
+            amount?: { e8s?: bigint };
+          };
+          const fromHex = accountIdToHex(op.from || []);
+          const toHex = accountIdToHex(op.to || []);
+          const amount = (op.amount?.e8s || 0n).toString();
+          const memo = memoToHex(tx.memo);
+
+          let direction: CsvRow["direction"] | null = null;
+          if (fromHex === icpAccountIdHex && toHex === icpAccountIdHex) direction = "self";
+          else if (toHex === icpAccountIdHex) direction = "inflow";
+          else if (fromHex === icpAccountIdHex) direction = "outflow";
+
+          if (direction) {
+            rows.push({
+              date_iso,
+              token: symbol,
+              direction,
+              amount: formatAmount(amount, decimals),
+              from_principal: "",
+              to_principal: "",
+              block_index: blockIndex.toString(),
+              memo,
+            });
           }
-        } catch (e) {
-          console.error(`    Error fetching from archive:`, e);
+          scanned++;
         }
       }
-      */
 
       scanned += blocks.length;
       cursor = start - 1n;
@@ -666,18 +681,20 @@ async function scanIcrcLedger(
       for (const archiveInfo of archived) {
         if (totalScanned >= MAX_BLOCKS_PER_LEDGER) break;
 
-        const ai = archiveInfo as { args?: unknown; callback?: unknown[] };
+        const ai = archiveInfo as {
+          args?: Array<{ start: bigint; length: bigint }>;
+          callback?: [Principal, string];
+        };
         const archiveArgs = ai.args;
-        if (!archiveArgs || (archiveArgs as unknown[]).length === 0) continue;
+        if (!archiveArgs || archiveArgs.length === 0) continue;
 
         const callback = ai.callback;
         if (!callback || !callback[0]) continue;
 
         try {
-          const archiveCanisterId = callback[0] as string;
           const archiveActor = Actor.createActor(ICRC3_IDL as any, {
             agent,
-            canisterId: archiveCanisterId,
+            canisterId: callback[0],
           });
 
           const icrc3Archive = archiveActor as unknown as {
@@ -767,7 +784,7 @@ async function main() {
     subaccount: null,
   };
 
-  console.log(`Unified ICP Transaction Scanner`);
+  console.log(`ICP Transaction Scanner`);
   console.log(`================================`);
   console.log(`Wallet Principal: ${WALLET_PRINCIPAL}`);
   console.log(`ICP Account ID: ${ICP_ACCOUNT_ID_HEX}`);
@@ -789,7 +806,7 @@ async function main() {
       let rows: CsvRow[];
 
       if (canisterId === LEDGERS.ICP) {
-        rows = await scanIcpLedger(canisterId, WALLET_PRINCIPAL, ICP_ACCOUNT_ID_HEX);
+        rows = await scanIcpLedger(canisterId, ICP_ACCOUNT_ID_HEX);
       } else {
         rows = await scanIcrcLedger(name, canisterId, wallet);
       }
