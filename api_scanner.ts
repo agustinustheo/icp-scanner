@@ -76,12 +76,17 @@ const VERIFY_CKUSDC_INDEX = BigInt(envNum("VERIFY_CKUSDC_INDEX", 408_821, 0));
 const VERIFY_ICP_INDEX = BigInt(envNum("VERIFY_ICP_INDEX", 25_906_544, 0));
 
 // ---------- Endpoints ----------
-// const LEDGER_API_V1 = "https://ledger-api.internetcomputer.org/api/v1"; // ICP (Dashboard) - deprecated
 const LEDGER_API_BASE = "https://ledger-api.internetcomputer.org"; // no /api prefix
 const ICRC_API_V1 = "https://icrc-api.internetcomputer.org/api/v1"; // ICRC (Dashboard v1)
 // Optional Rosetta (only if you run one)
 const ICP_ROSETTA = envStr("ICP_ROSETTA_URL", ""); // e.g. http://127.0.0.1:8081
 const ICRC_ROSETTA = envStr("ICRC_ROSETTA_URL", ""); // e.g. http://127.0.0.1:8082
+
+// ---------- ICRC Ledger Metadata ----------
+const ICRC_LEDGER_META: Record<string, { symbol: string; decimals: number }> = {};
+if (LEDGERS.ckBTC) ICRC_LEDGER_META[LEDGERS.ckBTC] = { symbol: "ckBTC", decimals: 8 }; // ckBTC has 8 decimals
+if (LEDGERS.ckUSDC) ICRC_LEDGER_META[LEDGERS.ckUSDC] = { symbol: "ckUSDC", decimals: 6 };
+if (LEDGERS.ckUSDT) ICRC_LEDGER_META[LEDGERS.ckUSDT] = { symbol: "ckUSDT", decimals: 6 };
 
 // ---------- CSV ----------
 type Direction = "inflow" | "outflow" | "self" | "mint" | "burn";
@@ -138,7 +143,25 @@ function formatAmount(raw: string, decimals: number): string {
   return trimmed ? `${whole}.${trimmed}` : whole;
 }
 function toISO(x: any) {
-  const d = new Date(x);
+  // Accept ISO strings and numeric epoch in s/ms/µs/ns
+  if (x === null || x === undefined) return "";
+  if (typeof x === "string" && x.trim() !== "" && isNaN(Number(x))) {
+    const d = new Date(x);
+    return Number.isFinite(d.getTime()) ? d.toISOString() : "";
+  }
+  let n = Number(x);
+  if (!Number.isFinite(n)) return "";
+
+  // Normalize to milliseconds
+  if (n > 1e18)
+    n = Math.floor(n / 1e6); // ns -> ms
+  else if (n > 1e15)
+    n = Math.floor(n / 1e3); // µs -> ms
+  else if (n > 1e12)
+    n = Math.floor(n); // already ms
+  else if (n > 1e5) n = Math.floor(n * 1000); // seconds -> ms
+
+  const d = new Date(n);
   return Number.isFinite(d.getTime()) ? d.toISOString() : "";
 }
 
@@ -179,26 +202,51 @@ async function fetchIcpTxByAccountHex(
   toISO: string,
   pageSize: number
 ): Promise<IcpTx[]> {
-  const limit = Math.min(100, Math.max(1, pageSize));
-  const start = Math.floor(new Date(fromISO).getTime() / 1000);
-  const end = Math.floor(new Date(toISO).getTime() / 1000);
+  const limit = Math.min(100, Math.max(1, pageSize)); // v2 hard max is 100
+  const created_at_start = Math.floor(new Date(fromISO).getTime() / 1000);
+  const created_at_end = Math.floor(new Date(toISO).getTime() / 1000);
 
   const out: IcpTx[] = [];
-  let after: string | undefined = undefined;
+  let after: string | undefined;
 
-  for (;;) {
-    const url = `${LEDGER_API_BASE}/v2/accounts/${accountHex}/transactions`;
-    const page: { data: IcpTx[]; next_cursor?: string } = await getJson(url, {
-      sort_by: "-block_height",
-      limit,
-      created_at_start: start,
-      created_at_end: end,
-      ...(after ? { after } : {}),
-    });
-    out.push(...(page.data || []));
-    if (!page.next_cursor || (page.data || []).length < limit) break;
-    after = page.next_cursor;
+  // ---- Preferred: v2 with cursor pagination
+  try {
+    for (;;) {
+      const url = `${LEDGER_API_BASE}/v2/accounts/${accountHex}/transactions`;
+      const page = await getJson<IcpV2Page>(url, {
+        sort_by: "-block_height", // required by v2
+        limit,
+        created_at_start,
+        created_at_end,
+        ...(after ? { after } : {}),
+      });
+      out.push(...(page.blocks || []));
+      if (!page.next_cursor || (page.blocks || []).length < limit) break;
+      after = page.next_cursor;
+    }
+    return out;
+  } catch {
+    // fall through to v1-style if v2 isn't reachable on this host
   }
+
+  // ---- Fallback: legacy /accounts/{id}/transactions (offset pagination)
+  // NOTE: older route uses `start`/`end` (epoch seconds) instead of `created_at_*`
+  let offset = 0;
+  for (;;) {
+    const url = `${LEDGER_API_BASE}/accounts/${accountHex}/transactions`;
+    const page = await getJson<{ blocks: IcpTx[]; total: number }>(url, {
+      sort_by: "-block_height",
+      limit: Math.min(100, limit),
+      offset,
+      start: created_at_start,
+      end: created_at_end,
+    });
+    const batch = page.blocks || [];
+    out.push(...batch);
+    if (batch.length === 0 || out.length >= page.total || batch.length < limit) break;
+    offset += batch.length;
+  }
+
   return out;
 }
 
@@ -226,6 +274,8 @@ async function fetchIcrcTxByAccount(
   const start = Math.floor(new Date(fromISO).getTime() / 1000);
   const end = Math.floor(new Date(toISO).getTime() / 1000);
 
+  const meta = ICRC_LEDGER_META[ledger] ?? { symbol: "TOKEN", decimals: 8 };
+
   const out: IcrcTx[] = [];
   let after: string | undefined;
 
@@ -236,32 +286,27 @@ async function fetchIcrcTxByAccount(
       sort_by: "-index",
       start,
       end,
-      query: owner,
-      include_kind: "transfer",
+      query: owner, // filter by principal
+      include_kind: "transfer", // only transfers
       ...(after ? { after } : {}),
     });
 
-    // Map the indexer's v2 'Transaction' objects into your IcrcTx shape
     for (const r of page.data || []) {
+      // prefer created_at (number), fallback to timestamp (string/num)
+      const ts = r?.created_at ?? r?.timestamp ?? "";
       out.push({
         id: String(r?.index ?? ""),
-        timestamp: r?.timestamp ?? "",
+        timestamp: ts, // leave raw; our toISO() will normalize
         op: String(r?.kind ?? "").toLowerCase(),
         from: r?.from_owner
-          ? {
-              owner: r.from_owner,
-              ...(r.from_subaccount ? { subaccount: r.from_subaccount } : {}),
-            }
+          ? { owner: r.from_owner, ...(r.from_subaccount ? { subaccount: r.from_subaccount } : {}) }
           : undefined,
         to: r?.to_owner
-          ? {
-              owner: r.to_owner,
-              ...(r.to_subaccount ? { subaccount: r.to_subaccount } : {}),
-            }
+          ? { owner: r.to_owner, ...(r.to_subaccount ? { subaccount: r.to_subaccount } : {}) }
           : undefined,
         amount: r?.amount ?? "0",
-        symbol: r?.symbol,
-        decimals: r?.decimals,
+        symbol: meta.symbol,
+        decimals: meta.decimals,
         memo_hex: r?.memo ?? "",
       });
     }
@@ -358,6 +403,13 @@ async function getIcrcBlockByIndex(ledger: string, index: bigint): Promise<IcrcB
     return null;
   }
 }
+
+// ICP v2 page type
+type IcpV2Page = {
+  blocks: IcpTx[];
+  total: number;
+  next_cursor?: string;
+};
 
 // ICP block detail (first try Ledger API if exposed, else ICP Rosetta /block)
 type IcpBlock = {
