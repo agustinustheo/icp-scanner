@@ -222,6 +222,74 @@ type CsvRow = {
   memo: string;
 };
 
+// ----- CSV helpers ----- //
+const CSV_HEADER: (keyof CsvRow)[] = [
+  "date_iso",
+  "token",
+  "direction",
+  "amount",
+  "from_principal",
+  "to_principal",
+  "block_index",
+  "memo",
+];
+
+function ensureCsvHeader(path: string) {
+  try {
+    if (!fs.existsSync(path) || fs.statSync(path).size === 0) {
+      fs.writeFileSync(path, CSV_HEADER.join(",") + "\n", "utf8");
+    }
+  } catch (e) {
+    console.error(`Failed to init CSV ${path}:`, e);
+  }
+}
+
+function csvEscape(v: unknown): string {
+  return `"${String(v ?? "").replace(/"/g, '""')}"`;
+}
+
+function rowToCsvLine(r: CsvRow): string {
+  return (
+    [
+      r.date_iso,
+      r.token,
+      r.direction,
+      r.amount,
+      r.from_principal,
+      r.to_principal,
+      r.block_index,
+      r.memo,
+    ]
+      .map(csvEscape)
+      .join(",") + "\n"
+  );
+}
+
+function appendRow(path: string, row: CsvRow) {
+  try {
+    fs.appendFileSync(path, rowToCsvLine(row), "utf8");
+  } catch (e) {
+    console.error(`Failed to append to ${path}:`, e, row);
+  }
+}
+
+function logRow(symbol: string, r: CsvRow) {
+  const path =
+    r.from_principal || r.to_principal
+      ? ` | ${r.from_principal || "-"} -> ${r.to_principal || "-"}`
+      : "";
+  const memo = r.memo ? ` | memo=${r.memo}` : "";
+  console.log(
+    `    [+] ${symbol} ${r.direction} ${r.amount} @ block ${r.block_index} | ${r.date_iso}${path}${memo}`
+  );
+}
+
+// Convenience: log + append together
+function emitRow(symbol: string, row: CsvRow) {
+  logRow(symbol, row);
+  appendRow(OUT_CSV, row);
+}
+
 // ---------- Helper Functions ----------
 function toHex(a: Uint8Array): string {
   return [...a].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -462,7 +530,7 @@ async function scanIcpLedger(canisterId: string, icpAccountIdHex: string): Promi
           else if (matchesFrom) direction = "outflow";
 
           if (direction) {
-            rows.push({
+            const row: CsvRow = {
               date_iso,
               token: symbol,
               direction,
@@ -471,7 +539,9 @@ async function scanIcpLedger(canisterId: string, icpAccountIdHex: string): Promi
               to_principal: "",
               block_index: blockIndex.toString(),
               memo,
-            });
+            };
+            rows.push(row);
+            emitRow(symbol, row);
           }
         }
       }
@@ -611,7 +681,7 @@ async function scanIcpLedger(canisterId: string, icpAccountIdHex: string): Promi
           else if (fromHex === icpAccountIdHex) direction = "outflow";
 
           if (direction) {
-            rows.push({
+            const row: CsvRow = {
               date_iso,
               token: symbol,
               direction,
@@ -620,7 +690,9 @@ async function scanIcpLedger(canisterId: string, icpAccountIdHex: string): Promi
               to_principal: "",
               block_index: blockIndex.toString(),
               memo,
-            });
+            };
+            rows.push(row);
+            emitRow(symbol, row);
           }
           scanned++;
         }
@@ -743,7 +815,7 @@ async function scanIcrcLedger(
             else if (eqAccount(from, wallet)) direction = "outflow";
 
             if (direction) {
-              rows.push({
+              const row: CsvRow = {
                 date_iso,
                 token: symbol,
                 direction,
@@ -752,7 +824,9 @@ async function scanIcrcLedger(
                 to_principal: to.owner.toText(),
                 block_index: blockId.toString(),
                 memo,
-              });
+              };
+              rows.push(row);
+              emitRow(symbol, row);
             }
           }
         }
@@ -827,7 +901,7 @@ async function scanIcrcLedger(
                 else if (eqAccount(from, wallet)) direction = "outflow";
 
                 if (direction) {
-                  rows.push({
+                  const row: CsvRow = {
                     date_iso,
                     token: symbol,
                     direction,
@@ -836,7 +910,9 @@ async function scanIcrcLedger(
                     to_principal: to.owner.toText(),
                     block_index: blockId.toString(),
                     memo,
-                  });
+                  };
+                  rows.push(row);
+                  emitRow(symbol, row);
                 }
               }
             }
@@ -882,6 +958,10 @@ async function main() {
   console.log(`  - Flexible block type detection`);
   console.log(`\n`);
 
+  ensureCsvHeader(OUT_CSV);
+  console.log(`CSV file: ${OUT_CSV} (appending rows as they're found)`);
+  console.log(`\n`);
+
   const all: CsvRow[] = [];
 
   for (const [name, canisterId] of Object.entries(LEDGERS)) {
@@ -907,35 +987,7 @@ async function main() {
   all.sort((a, b) => (a.date_iso || "").localeCompare(b.date_iso || ""));
 
   // Write CSV
-  const header = [
-    "date_iso",
-    "token",
-    "direction",
-    "amount",
-    "from_principal",
-    "to_principal",
-    "block_index",
-    "memo",
-  ];
-  const lines = [header.join(",")].concat(
-    all.map((r) =>
-      [
-        r.date_iso,
-        r.token,
-        r.direction,
-        r.amount,
-        r.from_principal,
-        r.to_principal,
-        r.block_index,
-        r.memo,
-      ]
-        .map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`)
-        .join(",")
-    )
-  );
-
-  fs.writeFileSync(OUT_CSV, lines.join("\n"), "utf8");
-  console.log(`✅ Wrote ${OUT_CSV} with ${all.length} rows`);
+  console.log(`✅ Scan complete. Appended ${all.length} rows to ${OUT_CSV}`);
 }
 
 main().catch((e) => {
