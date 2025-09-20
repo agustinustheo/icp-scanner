@@ -76,10 +76,11 @@ const VERIFY_CKUSDC_INDEX = BigInt(envNum("VERIFY_CKUSDC_INDEX", 408_821, 0));
 const VERIFY_ICP_INDEX = BigInt(envNum("VERIFY_ICP_INDEX", 25_906_544, 0));
 
 // ---------- Endpoints ----------
-const LEDGER_API_BASE = "https://ledger-api.internetcomputer.org"; // no /api prefix
+const LEDGER_HOST = "https://ledger-api.internetcomputer.org"; // canonical host
+const LEDGER_BASES = [LEDGER_HOST + "/api", LEDGER_HOST]; // try /api first, then root
 const ICRC_API_V1 = "https://icrc-api.internetcomputer.org/api/v1"; // ICRC (Dashboard v1)
 // Optional Rosetta (only if you run one)
-const ICP_ROSETTA = envStr("ICP_ROSETTA_URL", ""); // e.g. http://127.0.0.1:8081
+const ICP_ROSETTA = envStr("ICP_ROSETTA_URL", "https://rosetta-api.internetcomputer.org"); // default to public endpoint
 const ICRC_ROSETTA = envStr("ICRC_ROSETTA_URL", ""); // e.g. http://127.0.0.1:8082
 
 // ---------- ICRC Ledger Metadata ----------
@@ -167,6 +168,33 @@ function toISO(x: any) {
 
 // ---------- Fetch helpers ----------
 
+// Rosetta search transaction type
+type RosettaSearchTx = {
+  block_identifier: { index: number; hash: string };
+  transaction: {
+    transaction_identifier: { hash: string };
+    operations: Array<{
+      operation_identifier: { index: number };
+      type: string;
+      status: string;
+      account?: {
+        address: string;
+        sub_account?: { address: string };
+      };
+      amount?: {
+        value: string;
+        currency: { symbol: string; decimals: number };
+      };
+      metadata?: any;
+    }>;
+    metadata: {
+      timestamp?: string;
+      memo?: string;
+      [key: string]: any;
+    };
+  };
+};
+
 async function getJson<T>(url: string, params?: Record<string, string | number | undefined>) {
   const qp =
     params &&
@@ -183,6 +211,35 @@ async function getJson<T>(url: string, params?: Record<string, string | number |
   return (await res.json()) as T;
 }
 
+// Small fetch that tries multiple bases until one succeeds (2xx)
+async function getJsonFromBases<T>(
+  path: string,
+  params?: Record<string, string | number | undefined>
+): Promise<T> {
+  const qp =
+    params &&
+    Object.entries(params)
+      .filter(([, v]) => v !== undefined && v !== "")
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+      .join("&");
+  const paths = LEDGER_BASES.map((b) => `${b}${path}${qp ? `?${qp}` : ""}`);
+
+  let lastErr: any;
+  for (const url of paths) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new Error(`${res.status} ${res.statusText} for ${url}\n${body.slice(0, 256)}`);
+      }
+      return (await res.json()) as T;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr;
+}
+
 // ---------- ICP Ledger API (account tx history) ----------
 type IcpTx = {
   block_height: string;
@@ -196,6 +253,18 @@ type IcpTx = {
   created_at: number; // epoch seconds
   memo?: string;
 };
+
+// ICP v2 page normalization
+type IcpV2PageUnknown = any;
+type IcpV2PageNormalized = { items: IcpTx[]; next?: string | undefined };
+
+function normalizeIcpV2Page(j: IcpV2PageUnknown): IcpV2PageNormalized {
+  // Some deployments use {blocks: [...]}, others {data: [...]}
+  const items: IcpTx[] = (j?.blocks ?? j?.data ?? j?.transactions ?? []) as IcpTx[];
+  const next: string | undefined = j?.next_cursor ?? j?.next ?? j?.links?.next ?? undefined;
+  return { items, next };
+}
+
 async function fetchIcpTxByAccountHex(
   accountHex: string,
   fromISO: string,
@@ -209,41 +278,46 @@ async function fetchIcpTxByAccountHex(
   const out: IcpTx[] = [];
   let after: string | undefined;
 
-  // ---- Preferred: v2 with cursor pagination
+  // ---- Preferred: v2 (cursor)
   try {
     for (;;) {
-      const url = `${LEDGER_API_BASE}/v2/accounts/${accountHex}/transactions`;
-      const page = await getJson<IcpV2Page>(url, {
+      const pageRaw = await getJsonFromBases<any>(`/v2/accounts/${accountHex}/transactions`, {
         sort_by: "-block_height", // required by v2
         limit,
         created_at_start,
         created_at_end,
         ...(after ? { after } : {}),
       });
-      out.push(...(page.blocks || []));
-      if (!page.next_cursor || (page.blocks || []).length < limit) break;
-      after = page.next_cursor;
+      const page = normalizeIcpV2Page(pageRaw);
+      out.push(...page.items);
+      if (!page.next || page.items.length < limit) break;
+      after = page.next;
     }
-    return out;
+    if (out.length > 0) return out;
   } catch {
-    // fall through to v1-style if v2 isn't reachable on this host
+    // continue to v1 fallback
   }
 
-  // ---- Fallback: legacy /accounts/{id}/transactions (offset pagination)
-  // NOTE: older route uses `start`/`end` (epoch seconds) instead of `created_at_*`
+  // ---- Fallback: legacy v1 (offset)
   let offset = 0;
   for (;;) {
-    const url = `${LEDGER_API_BASE}/accounts/${accountHex}/transactions`;
-    const page = await getJson<{ blocks: IcpTx[]; total: number }>(url, {
-      sort_by: "-block_height",
-      limit: Math.min(100, limit),
-      offset,
-      start: created_at_start,
-      end: created_at_end,
-    });
-    const batch = page.blocks || [];
+    const page = await getJsonFromBases<{ blocks?: IcpTx[]; data?: IcpTx[]; total: number }>(
+      `/accounts/${accountHex}/transactions`,
+      {
+        sort_by: "-block_height",
+        limit: Math.min(100, limit),
+        offset,
+        start: created_at_start,
+        end: created_at_end,
+      }
+    );
+
+    const batch: IcpTx[] = (page.blocks ?? page.data ?? []) as IcpTx[];
     out.push(...batch);
-    if (batch.length === 0 || out.length >= page.total || batch.length < limit) break;
+
+    if (batch.length === 0 || out.length >= (page.total ?? out.length) || batch.length < limit) {
+      break;
+    }
     offset += batch.length;
   }
 
@@ -404,12 +478,104 @@ async function getIcrcBlockByIndex(ledger: string, index: bigint): Promise<IcrcB
   }
 }
 
-// ICP v2 page type
-type IcpV2Page = {
-  blocks: IcpTx[];
-  total: number;
-  next_cursor?: string;
-};
+// Helper: Post JSON to Rosetta endpoint
+async function postRosetta<T>(endpoint: string, body: any): Promise<T> {
+  const res = await fetch(`${ICP_ROSETTA}${endpoint}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => "");
+    throw new Error(`Rosetta ${res.status}: ${err.slice(0, 256)}`);
+  }
+  return await res.json();
+}
+
+// Fetch ICP transactions via Rosetta /search/transactions
+async function fetchIcpViaRosetta(
+  accountHex: string,
+  fromISO: string,
+  toISO: string,
+  pageSize: number
+): Promise<IcpTx[]> {
+  const limit = Math.min(100, Math.max(1, pageSize));
+  const out: IcpTx[] = [];
+
+  let offset = 0;
+  for (;;) {
+    const body = {
+      network_identifier: { blockchain: "Internet Computer", network: "00000000000000020101" },
+      account_identifier: { address: accountHex },
+      limit,
+      offset,
+    };
+
+    try {
+      const result = await postRosetta<{
+        transactions: RosettaSearchTx[];
+        total_count: number;
+        next_offset?: number;
+      }>("/search/transactions", body);
+
+      for (const rtx of result.transactions || []) {
+        const tsNano = rtx.transaction.metadata?.timestamp;
+        const tsMs = tsNano ? Number(BigInt(tsNano) / BigInt(1_000_000)) : 0;
+        const timestamp = new Date(tsMs);
+
+        // Skip transactions outside our date range
+        if (timestamp < new Date(fromISO) || timestamp > new Date(toISO)) {
+          continue;
+        }
+
+        // Find transfer operation
+        const transferOp = rtx.transaction.operations.find(
+          (op) => op.type === "TRANSACTION" || op.type === "TRANSFER"
+        );
+
+        if (!transferOp) continue;
+
+        // Determine from/to from operations
+        let from_account_identifier = "";
+        let to_account_identifier = "";
+        let amount = "0";
+
+        for (const op of rtx.transaction.operations) {
+          if (op.amount && op.amount.value.startsWith("-")) {
+            // Negative amount = sender
+            from_account_identifier = op.account?.address || "";
+          } else if (op.amount && !op.amount.value.startsWith("-")) {
+            // Positive amount = receiver
+            to_account_identifier = op.account?.address || "";
+            amount = op.amount.value;
+          }
+        }
+
+        out.push({
+          block_height: String(rtx.block_identifier.index),
+          block_hash: rtx.block_identifier.hash,
+          transaction_hash: rtx.transaction.transaction_identifier.hash,
+          transfer_type: "transfer",
+          amount,
+          from_account_identifier,
+          to_account_identifier,
+          created_at: Math.floor(tsMs / 1000), // convert to seconds
+          memo: rtx.transaction.metadata?.memo || "",
+        });
+      }
+
+      if (result.next_offset === undefined || result.transactions.length < limit) {
+        break;
+      }
+      offset = result.next_offset;
+    } catch (e) {
+      console.log(`  Rosetta error: ${e}`);
+      throw e;
+    }
+  }
+
+  return out;
+}
 
 // ICP block detail (first try Ledger API if exposed, else ICP Rosetta /block)
 type IcpBlock = {
@@ -422,7 +588,7 @@ type IcpBlock = {
   memo_hex?: string;
 };
 async function getIcpBlockByIndex(index: bigint): Promise<IcpBlock | null> {
-  // ICP block by index only available via Rosetta
+  // For public Rosetta, we use the network identifier for mainnet
   if (!ICP_ROSETTA) return null;
   try {
     const body = {
@@ -485,6 +651,84 @@ function passesStrictSub(t: IcrcTx, walletSubHex?: string): boolean {
   return fromOk || toOk;
 }
 
+// New: ICP global search fallback when account-scoped returns 0
+async function fetchIcpTxByAccountHexFallback(
+  accountHex: string,
+  fromISO: string,
+  toISO: string,
+  pageSize: number
+): Promise<IcpTx[]> {
+  const limit = Math.min(100, Math.max(1, pageSize));
+  const created_at_start = Math.floor(new Date(fromISO).getTime() / 1000);
+  const created_at_end = Math.floor(new Date(toISO).getTime() / 1000);
+
+  const out: IcpTx[] = [];
+
+  // helper to page a /v2/transactions query
+  async function pageV2(q: Record<string, any>) {
+    let after: string | undefined;
+    for (;;) {
+      const j = await getJsonFromBases<any>("/v2/transactions", {
+        sort_by: "-block_height",
+        limit,
+        created_at_start,
+        created_at_end,
+        ...(after ? { after } : {}),
+        ...q,
+      });
+      const items: IcpTx[] = (j?.blocks ?? j?.data ?? j?.transactions ?? []) as IcpTx[];
+      out.push(...items);
+      const next: string | undefined = j?.next_cursor ?? j?.next ?? j?.links?.next;
+      if (!next || items.length < limit) break;
+      after = next;
+    }
+  }
+
+  try {
+    // try v2 first, both directions
+    const beforeFrom = out.length;
+    await pageV2({ from_account: accountHex });
+    const fromCount = out.length - beforeFrom;
+
+    const beforeTo = out.length;
+    await pageV2({ to_account: accountHex });
+    const toCount = out.length - beforeTo;
+
+    if (out.length > 0) {
+      console.log(
+        `    Global v2: found ${fromCount} from_account + ${toCount} to_account = ${out.length} total`
+      );
+      return out;
+    }
+  } catch {
+    // fall through to v1
+  }
+
+  // v1 fallback: two passes (from/to) with offset paging
+  async function pageV1(q: Record<string, any>) {
+    let offset = 0;
+    for (;;) {
+      const j = await getJsonFromBases<any>("/transactions", {
+        sort_by: "-block_height",
+        limit: Math.min(100, limit),
+        offset,
+        start: created_at_start,
+        end: created_at_end,
+        ...q,
+      });
+      const batch: IcpTx[] = (j?.blocks ?? j?.data ?? []) as IcpTx[];
+      out.push(...batch);
+      if (batch.length === 0 || batch.length < Math.min(100, limit)) break;
+      offset += batch.length;
+    }
+  }
+
+  await pageV1({ from_account: accountHex });
+  await pageV1({ to_account: accountHex });
+
+  return out;
+}
+
 // ---------- Mapping → CSV (ICP + ICRC) ----------
 function mapIcpTxToCsv(t: IcpTx): CsvRow | null {
   const token = "ICP";
@@ -504,14 +748,14 @@ function mapIcpTxToCsv(t: IcpTx): CsvRow | null {
   if (!direction) return null;
 
   return {
-    date_iso: toISO((t.created_at ?? 0) * 1000),
+    date_iso: toISO((t.created_at ?? 0) * 1000), // seconds -> ms
     token,
     direction,
     amount: formatAmount(String(t.amount ?? "0"), decimals),
     from_principal: (t.from_account_identifier || "").toLowerCase(),
     to_principal: (t.to_account_identifier || "").toLowerCase(),
     block_index: String(t.block_height),
-    memo: (t.memo || "").toLowerCase(),
+    memo: String((t as any).icrc1_memo ?? t.memo ?? "").toLowerCase(),
   };
 }
 function mapIcrcTxToCsv(t: IcrcTx): CsvRow | null {
@@ -648,6 +892,11 @@ async function main() {
   console.log(`STRICT_SUB:      ${STRICT_SUB ? "1 (exact)" : "0 (owner-only)"}`);
   console.log("");
 
+  // Verify ICP Account ID (optional - requires @dfinity/ledger-icp)
+  console.log("Note: To verify ICP_ACCOUNT_ID_HEX matches your principal, run:");
+  console.log(`  dfx ledger account-id --of-principal ${WALLET_PRINCIPAL}`);
+  console.log("");
+
   // 1) Sanity checks
   await sanityCheckKnownTxs(WALLET_SUB_HEX || undefined);
 
@@ -662,8 +911,52 @@ async function main() {
   const tasks = Object.entries(LEDGERS).map(async ([name, canister]) => {
     try {
       if (name === "ICP") {
-        console.log(`Scanning ICP via Ledger API for ${ICP_ACCOUNT_ID_HEX} ...`);
-        const txs = await fetchIcpTxByAccountHex(ICP_ACCOUNT_ID_HEX, fromISO, toISO, PAGE);
+        console.log(`Scanning ICP for ${ICP_ACCOUNT_ID_HEX} ...`);
+
+        let txs: IcpTx[] = [];
+
+        // Try Rosetta first if available
+        if (ICP_ROSETTA) {
+          try {
+            console.log(`  Trying Rosetta API first...`);
+            txs = await fetchIcpViaRosetta(ICP_ACCOUNT_ID_HEX, fromISO, toISO, PAGE);
+            console.log(`  -> Rosetta returned ${txs.length} transactions`);
+          } catch (e) {
+            console.log(`  Rosetta failed, falling back to Dashboard API... \n${e}`);
+          }
+        }
+
+        // If Rosetta failed or returned nothing, try Dashboard API
+        if (txs.length === 0) {
+          console.log(`  Using Dashboard API...`);
+
+          // Quick smoke test: check if account has ANY ICP transactions (without date filter)
+          try {
+            const smokeInbound = await getJsonFromBases<any>("/v2/transactions", {
+              sort_by: "-block_height",
+              limit: 1,
+              to_account: ICP_ACCOUNT_ID_HEX,
+            });
+            const smokeOutbound = await getJsonFromBases<any>("/v2/transactions", {
+              sort_by: "-block_height",
+              limit: 1,
+              from_account: ICP_ACCOUNT_ID_HEX,
+            });
+            const hasInbound = (smokeInbound?.blocks ?? smokeInbound?.data ?? []).length > 0;
+            const hasOutbound = (smokeOutbound?.blocks ?? smokeOutbound?.data ?? []).length > 0;
+            console.log(
+              `  Smoke test: has ANY ICP txs? inbound=${hasInbound}, outbound=${hasOutbound}`
+            );
+          } catch (e) {
+            console.log(`  Smoke test failed:`, e);
+          }
+
+          txs = await fetchIcpTxByAccountHex(ICP_ACCOUNT_ID_HEX, fromISO, toISO, PAGE);
+          if (txs.length === 0) {
+            console.log(`  Account-scoped returned 0, trying global fallback...`);
+            txs = await fetchIcpTxByAccountHexFallback(ICP_ACCOUNT_ID_HEX, fromISO, toISO, PAGE);
+          }
+        }
         let n = 0;
         for (const t of txs) {
           const row = mapIcpTxToCsv(t);
