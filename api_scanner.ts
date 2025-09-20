@@ -78,6 +78,7 @@ const VERIFY_ICP_INDEX = BigInt(envNum("VERIFY_ICP_INDEX", 25_906_544, 0));
 // ---------- Endpoints ----------
 const LEDGER_API_V1 = "https://ledger-api.internetcomputer.org/api/v1"; // ICP
 const ICRC_API_V1 = "https://icrc-api.internetcomputer.org/api/v1"; // ICRC
+const ICRC_API_V2 = "https://icrc-api.internetcomputer.org/api/v2"; // ICRC v2
 // Rosetta fallbacks:
 const ICP_ROSETTA = "https://icp-rosetta.internetcomputer.org"; // reverse proxy may differ; override if needed
 const ICRC_ROSETTA = "https://icrc-rosetta.internetcomputer.org"; // ditto
@@ -140,11 +141,6 @@ function toISO(x: any) {
   const d = new Date(x);
   return Number.isFinite(d.getTime()) ? d.toISOString() : "";
 }
-function icrcAccountKey(owner: string, subHex?: string) {
-  const def = "0".repeat(64);
-  const s = (subHex || "").replace(/^0x/, "").toLowerCase();
-  return `${owner}:${s || def}`;
-}
 
 // ---------- Fetch helpers ----------
 async function getJson<T>(url: string, params?: Record<string, string | number | undefined>) {
@@ -158,6 +154,35 @@ async function getJson<T>(url: string, params?: Record<string, string | number |
   const res = await fetch(full);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${full}`);
   return (await res.json()) as T;
+}
+
+// ---------- ICRC API (v2: resolve account id then list tx) ----------
+type IcrcAccount = {
+  id: string; // <-- internal account id
+  owner: string;
+  subaccount?: string | null; // 64-hex or empty
+};
+
+// Resolve the internal account id from owner/subaccount (STRICT_SUB respected)
+async function resolveIcrcAccountId(
+  ledger: string,
+  owner: string,
+  subHex?: string
+): Promise<string | null> {
+  // v2 search supports query by owner/subaccount
+  // If STRICT_SUB==0, omit subaccount to match default (zero-32) + all subs of owner
+  const params: Record<string, string> = { owner };
+  if (STRICT_SUB && subHex && !/^0+$/.test(subHex)) params.subaccount = subHex.toLowerCase();
+
+  // v2: GET /api/v2/ledgers/{ledger}/accounts?owner=...&subaccount=...
+  const url = `${ICRC_API_V2}/ledgers/${ledger}/accounts`;
+  const page = await getJson<{ data: IcrcAccount[]; next_offset?: number | null }>(url, params);
+  if (!page?.data?.length) return null;
+
+  // If STRICT_SUB==0 and you get multiple accounts, pick the one with empty/zero sub first.
+  const zero = (s?: string | null) => !s || /^0+$/i.test(s);
+  const best = page.data.find((a) => zero(a.subaccount)) || page.data[0];
+  return best?.id ?? null;
 }
 
 // ---------- ICP Ledger API (account tx history) ----------
@@ -179,17 +204,25 @@ async function fetchIcpTxByAccountHex(
 ): Promise<IcpTx[]> {
   const out: IcpTx[] = [];
   let offset = 0;
+
   for (;;) {
-    const page = await getJson<IcpTxPage>(`${LEDGER_API_V1}/accounts/${accountHex}/transactions`, {
-      from: fromISO,
-      to: toISO,
-      limit: pageSize,
-      offset,
+    // Call *without* from/to to avoid 404s caused by parameter schema mismatches,
+    // then filter locally (same result, robust to param changes).
+    const url = `${LEDGER_API_V1}/accounts/${accountHex}/transactions`;
+    const page = await getJson<IcpTxPage>(url, { limit: pageSize, offset });
+
+    const inWindow = (t: IcpTx) => {
+      const ms = Date.parse(t.timestamp);
+      return Number.isFinite(ms) && ms >= START_DATE.getTime() && ms <= END_DATE.getTime();
+    };
+    (page.data || []).forEach((t) => {
+      if (inWindow(t)) out.push(t);
     });
-    (page.data || []).forEach((t) => out.push(t));
-    if (!page.next_offset && (page.data || []).length < pageSize) break;
+
+    const got = (page.data || []).length;
+    if (!page.next_offset && got < pageSize) break;
     offset = page.next_offset ?? offset + pageSize;
-    if ((page.data || []).length === 0) break;
+    if (got === 0) break;
   }
   return out;
 }
@@ -215,18 +248,33 @@ async function fetchIcrcTxByAccount(
   toISO: string,
   pageSize: number
 ): Promise<IcrcTx[]> {
+  const id = await resolveIcrcAccountId(ledger, owner, subHex);
+  if (!id) return [];
+
   const out: IcrcTx[] = [];
-  const acct = icrcAccountKey(owner, subHex);
   let offset = 0;
+
   for (;;) {
-    const page = await getJson<IcrcTxPage>(
-      `${ICRC_API_V1}/ledgers/${ledger}/accounts/${acct}/transactions`,
-      { from: fromISO, to: toISO, limit: pageSize, offset }
-    );
-    (page.data || []).forEach((t) => out.push(t));
-    if (!page.next_offset && (page.data || []).length < pageSize) break;
+    // v2: GET /api/v2/ledgers/{ledger}/accounts/{id}/transactions
+    // NOTE: to avoid 422s on date parsing variations, page server-side
+    // and filter client-side by timestamp.
+    const url = `${ICRC_API_V2}/ledgers/${ledger}/accounts/${id}/transactions`;
+    const page = await getJson<IcrcTxPage>(url, { limit: pageSize, offset });
+
+    // client-side date filter preserves your behavior
+    const inWindow = (t: IcrcTx) => {
+      const ms = Date.parse(t.timestamp);
+      return Number.isFinite(ms) && ms >= START_DATE.getTime() && ms <= END_DATE.getTime();
+    };
+
+    (page.data || []).forEach((t) => {
+      if (inWindow(t)) out.push(t);
+    });
+
+    const got = (page.data || []).length;
+    if (!page.next_offset && got < pageSize) break;
     offset = page.next_offset ?? offset + pageSize;
-    if ((page.data || []).length === 0) break;
+    if (got === 0) break;
   }
   return out;
 }
@@ -238,66 +286,81 @@ type IcrcBlock = {
   tx?: IcrcTx;
 };
 async function getIcrcBlockByIndex(ledger: string, index: bigint): Promise<IcrcBlock | null> {
-  // Try Dashboard ICRC API detail (exact path may evolve; this is the documented capability)
+  const idx = index.toString();
+
+  // Try v2 first
   try {
-    const r = await getJson<any>(`${ICRC_API_V1}/ledgers/${ledger}/blocks/${index.toString()}`);
-    // Normalize to a small shape
+    const r = await getJson<any>(`${ICRC_API_V2}/ledgers/${ledger}/blocks/${idx}`);
     return {
-      id: String(r?.id ?? index.toString()),
+      id: String(r?.id ?? idx),
       timestamp: String(r?.timestamp ?? r?.ts ?? ""),
       tx: r?.tx ?? r?.transaction ?? undefined,
     };
   } catch {
-    // Fallback: ICRC Rosetta /block
-    try {
-      const body = {
-        network_identifier: { blockchain: "IC", network: ledger },
-        block_identifier: { index: Number(index) },
-      };
-      const res = await fetch(`${ICRC_ROSETTA}/block`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) throw new Error(String(res.status));
-      const j = await res.json();
-      const tsMs = Number(j?.block?.timestamp ?? 0) / 1_000_000; // ns → ms
-      const ops = j?.block?.transactions?.[0]?.operations ?? [];
-      // Best-effort mapping
-      const firstOp = ops[0] || {};
-      const meta = firstOp?.metadata || {};
-      return {
+    // v2 API not available, try v1
+  }
+
+  // Then v1
+  try {
+    const r = await getJson<any>(`${ICRC_API_V1}/ledgers/${ledger}/blocks/${idx}`);
+    return {
+      id: String(r?.id ?? idx),
+      timestamp: String(r?.timestamp ?? r?.ts ?? ""),
+      tx: r?.tx ?? r?.transaction ?? undefined,
+    };
+  } catch {
+    // v1 API not available, try Rosetta
+  }
+
+  // Rosetta fallback unchanged…
+  try {
+    const body = {
+      network_identifier: { blockchain: "IC", network: ledger },
+      block_identifier: { index: Number(index) },
+    };
+    const res = await fetch(`${ICRC_ROSETTA}/block`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(String(res.status));
+    const j = await res.json();
+    const tsMs = Number(j?.block?.timestamp ?? 0) / 1_000_000; // ns → ms
+    const ops = j?.block?.transactions?.[0]?.operations ?? [];
+    // Best-effort mapping
+    const firstOp = ops[0] || {};
+    const meta = firstOp?.metadata || {};
+    return {
+      id: String(index),
+      timestamp: toISO(tsMs),
+      tx: {
         id: String(index),
         timestamp: toISO(tsMs),
-        tx: {
-          id: String(index),
-          timestamp: toISO(tsMs),
-          op: String(firstOp?.type || meta?.op || "transfer"),
-          ...(meta?.from
-            ? {
-                from: {
-                  owner: String(meta.from.owner),
-                  ...(meta.from.subaccount ? { subaccount: String(meta.from.subaccount) } : {}),
-                },
-              }
-            : {}),
-          ...(meta?.to
-            ? {
-                to: {
-                  owner: String(meta.to.owner),
-                  ...(meta.to.subaccount ? { subaccount: String(meta.to.subaccount) } : {}),
-                },
-              }
-            : {}),
-          amount: meta?.amount ?? meta?.amt ?? "0",
-          symbol: meta?.symbol || "TOKEN",
-          decimals: meta?.decimals ?? 8,
-          memo_hex: meta?.memo_hex || "",
-        },
-      };
-    } catch {
-      return null;
-    }
+        op: String(firstOp?.type || meta?.op || "transfer"),
+        ...(meta?.from
+          ? {
+              from: {
+                owner: String(meta.from.owner),
+                ...(meta.from.subaccount ? { subaccount: String(meta.from.subaccount) } : {}),
+              },
+            }
+          : {}),
+        ...(meta?.to
+          ? {
+              to: {
+                owner: String(meta.to.owner),
+                ...(meta.to.subaccount ? { subaccount: String(meta.to.subaccount) } : {}),
+              },
+            }
+          : {}),
+        amount: meta?.amount ?? meta?.amt ?? "0",
+        symbol: meta?.symbol || "TOKEN",
+        decimals: meta?.decimals ?? 8,
+        memo_hex: meta?.memo_hex || "",
+      },
+    };
+  } catch {
+    return null;
   }
 }
 
