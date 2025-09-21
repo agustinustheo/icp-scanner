@@ -138,28 +138,43 @@ The scanner generates a CSV file with the following columns:
 - `token`: Token symbol (ICP, ckBTC, ckUSDC, ckUSDT)
 - `direction`: Transaction type (inflow, outflow, self, mint, burn)
 - `amount`: Formatted amount with proper decimals
-- `from_principal`: Sender's principal ID
-- `to_principal`: Recipient's principal ID
+- `from_principal`: Sender's principal ID (for ICRC) or account ID (for ICP)
+- `from_subaccount`: Sender's subaccount in hex format (empty for default subaccount, blank for ICP)
+- `to_principal`: Recipient's principal ID (for ICRC) or account ID (for ICP)
+- `to_subaccount`: Recipient's subaccount in hex format (empty for default subaccount, blank for ICP)
 - `block_index`: Block number
 - `memo`: Transaction memo in hex format
 
 ### Example CSV Output
 
 ```csv
-date_iso,token,direction,amount,from_principal,to_principal,block_index,memo
-2025-11-25T07:36:36.103Z,ICP,outflow,0.05,ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe,6x3fv-2ddto-ik4gh-i2l2s-z62hn-5eeb2-xosoo-5yfhr-2xqv5-mqxkr-7qe,28370763,
-2025-11-24T15:18:31.816Z,ICP,outflow,0.00010000,ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe,7hfb6-caaaa-aaaar-qadga-cai,28357447,
-2025-11-17T09:47:33.313Z,ICP,inflow,0.01,2vxsx-fae,ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe,28125451,c8995b010000000000080013,
-2025-11-16T10:51:45.593Z,ICP,inflow,2.25000000,v3e4c-4aaaa-aaaah-afaaa-cai,ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe,28098523,
-2025-10-29T15:56:55.058Z,ICP,outflow,0.00010000,ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe,nns7d-5qaaa-aaaan-qitja-cai,27552802,
-2025-10-25T18:14:48.577Z,ICP,outflow,0.00010000,ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe,mxzaz-hqaaa-aaaar-qaada-cai,27428451,
-2025-10-17T06:27:55.426Z,ckBTC,outflow,0.00006152,ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe,mxzaz-hqaaa-aaaar-qaada-cai,2829644,
-2025-10-17T06:25:44.476Z,ckBTC,inflow,0.00008334,ns3jx-qyaaa-aaaar-qadbq-cai,ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe,2829627,
-2025-09-30T06:18:27.000Z,ckBTC,outflow,0.00001000,ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe,mxzaz-hqaaa-aaaar-qaada-cai,2819641,
-2025-09-30T06:13:44.000Z,ckBTC,inflow,0.00001061,ns3jx-qyaaa-aaaar-qadbq-cai,ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe,2819638,
-2025-09-26T10:42:39.000Z,ckBTC,outflow,0.00001000,ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe,mxzaz-hqaaa-aaaar-qaada-cai,2817468,
-2025-09-26T10:41:09.000Z,ckBTC,inflow,0.00004018,ns3jx-qyaaa-aaaar-qadbq-cai,ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe,2817467,
+date_iso,token,direction,amount,from_principal,from_subaccount,to_principal,to_subaccount,block_index,memo
+2025-07-23T07:55:03.000Z,ICP,outflow,0.0171,e71fb5d09ec4082185c469d95ea1628e1fd5a6b3302cc7ed001df577995e9297,,8585fdac56c2733021c57ae9cab6fb57bd67edc6ceb75dc3f75116e8031bc1f5,,25906544,
+2025-07-17T05:26:17.000Z,ICP,outflow,0.02,e71fb5d09ec4082185c469d95ea1628e1fd5a6b3302cc7ed001df577995e9297,,ac801181c724872270475e1ab0d74fda7b60cc0163534f95512cc3a4f9a0880d,,25719349,
+2025-07-14T23:27:19.000Z,ICP,inflow,0.3709,8b57f932fa624a9214afc2e2fda6e3d4bbc77cafec755249cb4279eee7089b70,,e71fb5d09ec4082185c469d95ea1628e1fd5a6b3302cc7ed001df577995e9297,,25652617,
+2025-07-23T08:04:18.852Z,ckBTC,outflow,0.000001,ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe,,g5nrt-myaaa-aaaap-qhluq-cai-tewwnyq.39,0x0000000000000000000000000000000000000000000000000000000000000027,2821412,
+2025-07-17T04:18:05.333Z,ckBTC,outflow,0.000001,ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe,,g5nrt-myaaa-aaaap-qhluq-cai-tzakf6y.35,0x0000000000000000000000000000000000000000000000000000000000000023,2783712,
+2025-07-15T04:19:27.155Z,ckBTC,outflow,0.0000031,ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe,,uiz2m-baaaa-aaaal-qjbxq-cai-jr377uq.109,0x000000000000000000000000000000000000000000000000000000000000006d,2767933,
+2025-07-14T23:26:39.567Z,ckBTC,inflow,0.00002191,6izkb-536f7-eib6o-anvgi-ob4rq-httn6-cqfqr-7yxg2-kxupl-sgar2-qqe,,ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe,,2766063,
+2025-07-23T07:16:00.486Z,ckUSDC,outflow,0.1,ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe,,g5nrt-myaaa-aaaap-qhluq-cai-5yvfm5a.38,0x0000000000000000000000000000000000000000000000000000000000000026,408821,
+2025-07-16T10:35:20.174Z,ckUSDC,outflow,0.1,ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe,,uiz2m-baaaa-aaaal-qjbxq-cai-3teoeqy.98,0x0000000000000000000000000000000000000000000000000000000000000062,402083,
+2025-07-14T23:25:37.718Z,ckUSDC,inflow,3.027622,6izkb-536f7-eib6o-anvgi-ob4rq-httn6-cqfqr-7yxg2-kxupl-sgar2-qqe,,ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe,,400920,
+2025-07-23T07:43:04.183Z,ckUSDT,outflow,0.1,ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe,,g5nrt-myaaa-aaaap-qhluq-cai-bgjhw4y.40,0x0000000000000000000000000000000000000000000000000000000000000028,585442,
+2025-07-14T23:27:00.444Z,ckUSDT,inflow,3.026306,6izkb-536f7-eib6o-anvgi-ob4rq-httn6-cqfqr-7yxg2-kxupl-sgar2-qqe,,ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe,,554863,
 ```
+
+### Notes on Subaccounts
+
+- **ICRC tokens** (ckBTC, ckUSDC, ckUSDT):
+  - `from_principal` and `to_principal` now show human-readable ICRC account format: `<principal>-<tag>.<subaccount>`
+  - Subaccount suffixes are shown as decimal numbers for small values (e.g., `.26` for subaccount 26)
+  - Large subaccounts are shown in hex format (e.g., `.0xfedcba0987654321`)
+  - Default subaccounts (all zeros) are omitted from the principal text
+  - Raw hex subaccounts are still available in `from_subaccount` and `to_subaccount` columns
+- **ICP transactions**:
+  - Shows 64-character hex account identifiers in both principal columns
+  - Subaccount fields are always empty because the ICP ledger API only provides account ID hashes
+  - These account IDs are one-way hashes of the principal and subaccount, so the original subaccount cannot be recovered
 
 ## Technical Details
 

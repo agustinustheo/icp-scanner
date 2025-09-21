@@ -14,6 +14,9 @@ importers:
       '@dfinity/candid':
         specifier: ^3.2.6
         version: 3.2.6(@dfinity/principal@3.2.6)
+      '@dfinity/ledger-icrc':
+        specifier: ^4.0.1
+        version: 4.0.1(@dfinity/agent@3.2.6(@dfinity/candid@3.2.6(@dfinity/principal@3.2.6))(@dfinity/principal@3.2.6)(@noble/hashes@1.8.0))(@dfinity/candid@3.2.6(@dfinity/principal@3.2.6))(@dfinity/principal@3.2.6)(@dfinity/utils@3.1.0(@dfinity/agent@3.2.6(@dfinity/candid@3.2.6(@dfinity/principal@3.2.6))(@dfinity/principal@3.2.6)(@noble/hashes@1.8.0))(@dfinity/candid@3.2.6(@dfinity/principal@3.2.6))(@dfinity/principal@3.2.6))
       '@dfinity/principal':
         specifier: ^3.2.6
         version: 3.2.6
@@ -67,8 +70,23 @@ packages:
   '@dfinity/cbor@0.2.2':
     resolution: {integrity: sha512-GPJpH73kDEKbUBdUjY80lz7cq9l0vm1h/7ppejPV6O0ZTqCLrYspssYvqjRmK4aNnJ/SKXsP0rg9LYX7zpegaA==}
 
+  '@dfinity/ledger-icrc@4.0.1':
+    resolution: {integrity: sha512-LfB4HmKeaMpkyrQRLCi5F4BP1f5yG/KVm7VMd2xrKsVmbXvAbl9VjqleTLhICZuNcgDwpczVdvSnR/WJy8i62Q==}
+    peerDependencies:
+      '@dfinity/agent': ^3
+      '@dfinity/candid': ^3
+      '@dfinity/principal': ^3
+      '@dfinity/utils': ^3
+
   '@dfinity/principal@3.2.6':
     resolution: {integrity: sha512-jxEmMwZe2k/XC0DEW1i7CVJ/vPzIKT0zvXeQIBuvkfEcqWSVRiScHlURwnYStQAE1RVP8glDEs6ioeZgmEmazA==}
+
+  '@dfinity/utils@3.1.0':
+    resolution: {integrity: sha512-e4Iunp147nN/gpph/7miZkxwYkctA3AyuKla0vbwK9RNJE7Rub43Zwo0mlhjYq6WHjIxIEL/8n+AAJj9+RjZcw==}
+    peerDependencies:
+      '@dfinity/agent': ^3
+      '@dfinity/candid': ^3
+      '@dfinity/principal': ^3
 
   '@eslint-community/eslint-utils@4.9.0':
     resolution: {integrity: sha512-ayVFHdtZ+hsq1t2Dy24wCmGXGe4q9Gu3smhLYALJrr473ZH27MsnSL+LKUlimp4BWJqMDMLmPpx/Q9R3OAlL4g==}
@@ -709,9 +727,22 @@ snapshots:
 
   '@dfinity/cbor@0.2.2': {}
 
+  '@dfinity/ledger-icrc@4.0.1(@dfinity/agent@3.2.6(@dfinity/candid@3.2.6(@dfinity/principal@3.2.6))(@dfinity/principal@3.2.6)(@noble/hashes@1.8.0))(@dfinity/candid@3.2.6(@dfinity/principal@3.2.6))(@dfinity/principal@3.2.6)(@dfinity/utils@3.1.0(@dfinity/agent@3.2.6(@dfinity/candid@3.2.6(@dfinity/principal@3.2.6))(@dfinity/principal@3.2.6)(@noble/hashes@1.8.0))(@dfinity/candid@3.2.6(@dfinity/principal@3.2.6))(@dfinity/principal@3.2.6))':
+    dependencies:
+      '@dfinity/agent': 3.2.6(@dfinity/candid@3.2.6(@dfinity/principal@3.2.6))(@dfinity/principal@3.2.6)(@noble/hashes@1.8.0)
+      '@dfinity/candid': 3.2.6(@dfinity/principal@3.2.6)
+      '@dfinity/principal': 3.2.6
+      '@dfinity/utils': 3.1.0(@dfinity/agent@3.2.6(@dfinity/candid@3.2.6(@dfinity/principal@3.2.6))(@dfinity/principal@3.2.6)(@noble/hashes@1.8.0))(@dfinity/candid@3.2.6(@dfinity/principal@3.2.6))(@dfinity/principal@3.2.6)
+
   '@dfinity/principal@3.2.6':
     dependencies:
       '@noble/hashes': 1.8.0
+
+  '@dfinity/utils@3.1.0(@dfinity/agent@3.2.6(@dfinity/candid@3.2.6(@dfinity/principal@3.2.6))(@dfinity/principal@3.2.6)(@noble/hashes@1.8.0))(@dfinity/candid@3.2.6(@dfinity/principal@3.2.6))(@dfinity/principal@3.2.6)':
+    dependencies:
+      '@dfinity/agent': 3.2.6(@dfinity/candid@3.2.6(@dfinity/principal@3.2.6))(@dfinity/principal@3.2.6)(@noble/hashes@1.8.0)
+      '@dfinity/candid': 3.2.6(@dfinity/principal@3.2.6)
+      '@dfinity/principal': 3.2.6
 
   '@eslint-community/eslint-utils@4.9.0(eslint@8.57.1)':
     dependencies:

@@ -17,6 +17,8 @@
  */
 
 import * as fs from "fs";
+import { Principal } from "@dfinity/principal";
+import { encodeIcrcAccount } from "@dfinity/ledger-icrc";
 
 // ==================== Environment Helpers ====================
 
@@ -128,7 +130,9 @@ type CsvRow = {
   direction: Direction;
   amount: string;
   from_principal: string;
+  from_subaccount: string;
   to_principal: string;
+  to_subaccount: string;
   block_index: string;
   memo: string;
 };
@@ -167,7 +171,9 @@ const csv = {
     "direction",
     "amount",
     "from_principal",
+    "from_subaccount",
     "to_principal",
+    "to_subaccount",
     "block_index",
     "memo",
   ] as const,
@@ -246,6 +252,83 @@ const utils = {
   normalizeSubaccount: (sub?: string): string => {
     const normalized = (sub || "").replace(/^0x/, "").toLowerCase();
     return !normalized || /^0+$/.test(normalized) ? "" : normalized;
+  },
+
+  /**
+   * HEX -> Uint8Array (expects even-length hex; empty -> undefined)
+   */
+  hexToBytes: (hex?: string): Uint8Array | undefined => {
+    const h = utils.normalizeSubaccount(hex);
+    if (!h) return undefined;
+    const out = new Uint8Array(h.length / 2);
+    for (let i = 0; i < h.length; i += 2) {
+      out[i / 2] = parseInt(h.slice(i, i + 2), 16);
+    }
+    return out;
+  },
+
+  /**
+   * If a 32-byte subaccount is a small big-endian NAT (fits in <= 64 bits by default),
+   * return its decimal string; otherwise return "0x<hex>".
+   * This makes dashboard-like suffixes such as ".26".
+   */
+  subaccountSuffix: (subHex?: string, maxBits = 64): string => {
+    const h = utils.normalizeSubaccount(subHex);
+    if (!h) return "";
+    if (h.length !== 64) return `0x${h}`; // not 32 bytes -> keep hex
+    try {
+      const v = BigInt("0x" + h);
+      const max = (BigInt(1) << BigInt(maxBits)) - BigInt(1);
+      // If the value fits in maxBits, prefer decimal (nicer for canister "subaccount N")
+      return v <= max ? v.toString(10) : `0x${h}`;
+    } catch {
+      return `0x${h}`;
+    }
+  },
+
+  /**
+   * Create a human-readable ICRC account string (dashboard/spec style):
+   *   <principal>-<shortTag>.<sub>
+   * where ".<sub>" is rendered as decimal when it's a small BE integer; otherwise as 0xHEX.
+   * Falls back gracefully if principal/subaccount are missing.
+   *
+   * NOTE: Uses DFINITY's encodeIcrcAccount to produce the base "<principal>-<tag>.<0xHEX>",
+   * then replaces the tail with decimal if applicable.
+   */
+  icrcAccountText: (owner?: string, subHex?: string): string => {
+    if (!owner) return "";
+    try {
+      const principal = Principal.fromText(owner);
+      const subBytes = utils.hexToBytes(subHex);
+      // Base string from library (e.g., "g5nrt-...-5yvfm5a.0x000000...001a")
+      let base = subBytes
+        ? encodeIcrcAccount({ owner: principal, subaccount: subBytes })
+        : encodeIcrcAccount({ owner: principal });
+      // Swap the ".0xHEX" tail for decimal if it is a small BE integer
+      const suffix = utils.subaccountSuffix(subHex);
+      if (suffix && suffix !== "0x" + (subHex || "")) {
+        // Replace the part after the last '.'
+        const dot = base.lastIndexOf(".");
+        if (dot !== -1 && suffix !== "0x") {
+          base = base.slice(0, dot + 1) + suffix;
+        }
+      }
+      return base;
+    } catch {
+      // Fallbacks
+      const suffix = utils.subaccountSuffix(subHex);
+      return suffix ? `${owner}.${suffix}` : owner;
+    }
+  },
+
+  /**
+   * Canonicalize an ICRC subaccount string for CSV:
+   *  - returns "" for empty/all-zeros (default account)
+   *  - lowercases and ensures 0x prefix for non-empty values
+   */
+  subaccountForCsv: (sub?: string): string => {
+    const norm = utils.normalizeSubaccount(sub);
+    return norm ? `0x${norm}` : "";
   },
 };
 
@@ -875,7 +958,9 @@ const csvMapping = {
       direction,
       amount: utils.formatAmount(String(tx.amount ?? "0"), 8),
       from_principal: fromHex,
+      from_subaccount: "", // ICP exposes account-ids only; subaccounts not available
       to_principal: toHex,
+      to_subaccount: "", // ICP exposes account-ids only; subaccounts not available
       block_index: String(tx.block_height),
       memo: String((tx as any).icrc1_memo ?? tx.memo ?? "").toLowerCase(),
     };
@@ -909,8 +994,11 @@ const csvMapping = {
       token: tx.symbol || "TOKEN",
       direction,
       amount: utils.formatAmount(String(tx.amount ?? "0"), tx.decimals ?? 8),
-      from_principal: tx.from?.owner || "",
-      to_principal: tx.to?.owner || "",
+      // Put human-readable principal+subaccount (dashboard/spec style) into the principal columns
+      from_principal: utils.icrcAccountText(tx.from?.owner, tx.from?.subaccount),
+      from_subaccount: utils.subaccountForCsv(tx.from?.subaccount),
+      to_principal: utils.icrcAccountText(tx.to?.owner, tx.to?.subaccount),
+      to_subaccount: utils.subaccountForCsv(tx.to?.subaccount),
       block_index: String(tx.id),
       memo: (tx.memo_hex || "").toLowerCase(),
     };
@@ -956,8 +1044,12 @@ const sanityChecks = {
     else direction = "mint";
 
     console.log(`  Block ts: ${utils.toISO(tx.timestamp)}`);
-    console.log(`  From: ${tx.from?.owner || "-"} / sub=${tx.from?.subaccount || "(default)"}`);
-    console.log(`  To  : ${tx.to?.owner || "-"} / sub=${tx.to?.subaccount || "(default)"}`);
+    console.log(
+      `  From: ${tx.from?.owner || "-"} / sub=${utils.subaccountForCsv(tx.from?.subaccount) || "(default)"}`
+    );
+    console.log(
+      `  To  : ${tx.to?.owner || "-"} / sub=${utils.subaccountForCsv(tx.to?.subaccount) || "(default)"}`
+    );
     console.log(
       `  Amount: ${utils.formatAmount(String(tx.amount ?? "0"), expectedDecimals)} ${tx.symbol || tokenName}`
     );
