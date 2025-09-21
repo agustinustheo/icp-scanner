@@ -343,18 +343,21 @@ flowchart LR
 ### Final Wallet Balances (Positive Only)
 
 **ICP Token:**
+
 - `8585fdac56c2733021c57ae9cab6fb57bd67edc6ceb75dc3f75116e8031bc1f5`: **+0.0511 ICP**
 - `ac801181c724872270475e1ab0d74fda7b60cc0163534f95512cc3a4f9a0880d`: **+0.04 ICP**
 - `73bb002a5ca69d63e692d99383353082e591bacd439ef25eb22e8078904344eb`: **+0.12 ICP**
 - `8b57f932fa624a9214afc2e2fda6e3d4bbc77cafec755249cb4279eee7089b70`: **+0.2424 ICP**
 
 **ckBTC Token:**
+
 - `ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe`: **+0.00001081 ckBTC**
 - `g5nrt-myaaa-aaaap-qhluq-cai-tewwnyq.39`: **+0.000001 ckBTC**
 - `g5nrt-myaaa-aaaap-qhluq-cai-tzakf6y.35`: **+0.000001 ckBTC**
 - `uiz2m-baaaa-aaaal-qjbxq-cai-jr377uq.109`: **+0.0000101 ckBTC**
 
 **ckUSDC Token:**
+
 - `ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe`: **+10.664462 ckUSDC**
 - `g5nrt-myaaa-aaaap-qhluq-cai-5yvfm5a.38`: **+0.1 ckUSDC**
 - `g5nrt-myaaa-aaaap-qhluq-cai-aasdowa.36`: **+0.3 ckUSDC**
@@ -363,6 +366,7 @@ flowchart LR
 - `gf3g2-eaeha-ii22q-ij5tb-bep3w-xxwgx-h4roh-6c2sm-cx2sw-tppv4-qqe`: **+0.5 ckUSDC**
 
 **ckUSDT Token:**
+
 - `ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe`: **+2.295287 ckUSDT**
 - `g5nrt-myaaa-aaaap-qhluq-cai-bgjhw4y.40`: **+0.1 ckUSDT**
 - `uiz2m-baaaa-aaaal-qjbxq-cai-vsrbnta.103`: **+0.85 ckUSDT**

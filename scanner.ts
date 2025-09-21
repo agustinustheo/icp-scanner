@@ -54,11 +54,11 @@ const config = {
   wallet: {
     principal: env.getString(
       "WALLET_PRINCIPAL",
-      "ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe"
+      "6izkb-536f7-eib6o-anvgi-ob4rq-httn6-cqfqr-7yxg2-kxupl-sgar2-qqe"
     ),
     accountIdHex: env.getHex(
       "ICP_ACCOUNT_ID_HEX",
-      "e71fb5d09ec4082185c469d95ea1628e1fd5a6b3302cc7ed001df577995e9297"
+      "8b57f932fa624a9214afc2e2fda6e3d4bbc77cafec755249cb4279eee7089b70"
     ),
     subaccountHex: env.getHex("WALLET_SUBACCOUNT_HEX", ""),
   },
