@@ -285,3 +285,85 @@ This scanner provides a unified interface for tracking token flows across the IC
 - **Reliability**: Multiple API fallbacks ensure maximum uptime
 
 The scanner automatically handles API differences, archive redirects, and various response formats to provide a seamless experience for tracking your ICP ecosystem transactions.
+
+## Transaction Flow Analysis
+
+When you are finished, you can use the CSV to make a cool flow chart like the following:
+
+### Wallet Flow Chart
+
+```mermaid
+flowchart LR
+    A["e71fb5d...9297"]
+    B["8585fdac...1f5<br/>+0.0511 ICP"]
+    C["ac801181...880d<br/>+0.04 ICP"]
+    D["73bb002a...44eb<br/>+0.12 ICP"]
+    E["8b57f932...9b70<br/>+0.2424 ICP"]
+    F["ijsei-nrxkc...aqe<br/>+0.00001081 ckBTC<br/>+10.664462 ckUSDC<br/>+2.295287 ckUSDT"]
+    G["g5nrt-myaaa...39<br/>+0.000001 ckBTC"]
+    H["g5nrt-myaaa...35<br/>+0.000001 ckBTC"]
+    I["uiz2m-baaaa...109<br/>+0.0000101 ckBTC"]
+    J["6izkb-536f7...qqe"]
+    K["g5nrt-myaaa...38<br/>+0.1 ckUSDC"]
+    L["g5nrt-myaaa...36<br/>+0.3 ckUSDC"]
+    M["g5nrt-myaaa...34<br/>+0.6 ckUSDC"]
+    N["uiz2m-baaaa...98<br/>+11.9 ckUSDC<br/>+0.85 ckUSDT"]
+    O["gf3g2-eaeha...qqe<br/>+0.5 ckUSDC"]
+    P["g5nrt-myaaa...40<br/>+0.1 ckUSDT"]
+    Q["uiz2m-baaaa...103<br/>+0.85 ckUSDT"]
+    R["uiz2m-baaaa...99<br/>+1 ckUSDT"]
+
+    %% ICP flows
+    A -- "ICP 0.0511" --> B
+    A -- "ICP 0.04" --> C
+    A -- "ICP 0.12" --> D
+    E -- "ICP 0.2425" --> A
+
+    %% ckBTC flows
+    F -- "ckBTC 0.000001" --> G
+    F -- "ckBTC 0.000001" --> H
+    F -- "ckBTC 0.0000101" --> I
+    J -- "ckBTC 0.00002191" --> F
+
+    %% ckUSDC flows
+    J -- "ckUSDC 10.664462" --> F
+    F -- "ckUSDC 0.1" --> K
+    F -- "ckUSDC 0.3" --> L
+    F -- "ckUSDC 0.6" --> M
+    F -- "ckUSDC 11.9" --> N
+    F -- "ckUSDC 0.5" --> O
+
+    %% ckUSDT flows
+    J -- "ckUSDT 2.676306" --> F
+    F -- "ckUSDT 0.1" --> P
+    F -- "ckUSDT 0.85" --> Q
+    F -- "ckUSDT 1" --> R
+```
+
+### Final Wallet Balances (Positive Only)
+
+**ICP Token:**
+- `8585fdac56c2733021c57ae9cab6fb57bd67edc6ceb75dc3f75116e8031bc1f5`: **+0.0511 ICP**
+- `ac801181c724872270475e1ab0d74fda7b60cc0163534f95512cc3a4f9a0880d`: **+0.04 ICP**
+- `73bb002a5ca69d63e692d99383353082e591bacd439ef25eb22e8078904344eb`: **+0.12 ICP**
+- `8b57f932fa624a9214afc2e2fda6e3d4bbc77cafec755249cb4279eee7089b70`: **+0.2424 ICP**
+
+**ckBTC Token:**
+- `ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe`: **+0.00001081 ckBTC**
+- `g5nrt-myaaa-aaaap-qhluq-cai-tewwnyq.39`: **+0.000001 ckBTC**
+- `g5nrt-myaaa-aaaap-qhluq-cai-tzakf6y.35`: **+0.000001 ckBTC**
+- `uiz2m-baaaa-aaaal-qjbxq-cai-jr377uq.109`: **+0.0000101 ckBTC**
+
+**ckUSDC Token:**
+- `ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe`: **+10.664462 ckUSDC**
+- `g5nrt-myaaa-aaaap-qhluq-cai-5yvfm5a.38`: **+0.1 ckUSDC**
+- `g5nrt-myaaa-aaaap-qhluq-cai-aasdowa.36`: **+0.3 ckUSDC**
+- `g5nrt-myaaa-aaaap-qhluq-cai-5fdze3i.34`: **+0.6 ckUSDC**
+- `uiz2m-baaaa-aaaal-qjbxq-cai-3teoeqy.98`: **+11.9 ckUSDC**
+- `gf3g2-eaeha-ii22q-ij5tb-bep3w-xxwgx-h4roh-6c2sm-cx2sw-tppv4-qqe`: **+0.5 ckUSDC**
+
+**ckUSDT Token:**
+- `ijsei-nrxkc-26l5m-cj5ki-tkdti-7befc-6lhjr-ofope-4szgt-hmnvc-aqe`: **+2.295287 ckUSDT**
+- `g5nrt-myaaa-aaaap-qhluq-cai-bgjhw4y.40`: **+0.1 ckUSDT**
+- `uiz2m-baaaa-aaaal-qjbxq-cai-vsrbnta.103`: **+0.85 ckUSDT**
+- `uiz2m-baaaa-aaaal-qjbxq-cai-vph5fvi.99`: **+1 ckUSDT**
