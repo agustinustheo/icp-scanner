@@ -10,7 +10,6 @@ import axios from "axios";
 import * as dotenv from "dotenv";
 import * as fs from "fs";
 import * as path from "path";
-import { Principal } from "@dfinity/principal";
 
 dotenv.config();
 
@@ -46,7 +45,7 @@ interface RosettaTransaction {
         };
       };
     }>;
-    metadata?: any;
+    metadata?: unknown;
   };
 }
 
@@ -76,19 +75,19 @@ const ROSETTA_CONFIGS = {
     decimals: 8,
   },
   CKBTC: {
-    url: process.env.CKBTC_ROSETTA_URL || "https://icrc-rosetta-api.internetcomputer.org",
+    url: process.env.CKBTC_ROSETTA_URL || "https://icrc-api.internetcomputer.org/api/v1",
     network: "mxzaz-hqaaa-aaaar-qaada-cai",
     symbol: "ckBTC",
     decimals: 8,
   },
   CKUSDC: {
-    url: process.env.CKUSDC_ROSETTA_URL || "https://icrc-rosetta-api.internetcomputer.org",
+    url: process.env.CKUSDC_ROSETTA_URL || "https://icrc-api.internetcomputer.org/api/v1",
     network: "xevnm-gaaaa-aaaar-qafnq-cai",
     symbol: "ckUSDC",
     decimals: 6,
   },
   CKUSDT: {
-    url: process.env.CKUSDT_ROSETTA_URL || "https://icrc-rosetta-api.internetcomputer.org",
+    url: process.env.CKUSDT_ROSETTA_URL || "https://icrc-api.internetcomputer.org/api/v1",
     network: "cngnf-vqaaa-aaaar-qag4q-cai",
     symbol: "ckUSDT",
     decimals: 6,
@@ -323,10 +322,13 @@ function parseAddress(address: string): { principal: string; subaccount?: string
   // Check if it's a principal with subaccount (format: principal-xxx.hex)
   const match = address.match(/^([a-z0-9-]+)(?:-([a-z0-9]+))?\.([\da-f]+)$/);
   if (match) {
-    return {
+    const result: { principal: string; subaccount?: string } = {
       principal: match[1] + (match[2] ? `-${match[2]}` : ""),
-      subaccount: match[3],
     };
+    if (match[3]) {
+      result.subaccount = match[3];
+    }
+    return result;
   }
 
   // Check if it's just a principal
@@ -364,7 +366,21 @@ async function searchTransactions(
   const parsedAddress = parseAddress(address);
   const url = `${config.url}/search/transactions`;
 
-  const requestData: any = {
+  interface RosettaSearchRequest {
+    network_identifier: {
+      blockchain: string;
+      network: string;
+    };
+    account_identifier: {
+      address: string;
+      sub_account?: {
+        address: string;
+      };
+    };
+    limit: number;
+  }
+
+  const requestData: RosettaSearchRequest = {
     network_identifier: {
       blockchain: "Internet Computer",
       network: config.network,
@@ -390,11 +406,15 @@ async function searchTransactions(
     });
 
     return response.data.transactions || [];
-  } catch (error: any) {
-    if (error.response?.status === 404) {
+  } catch (error: unknown) {
+    const err = error as { response?: { status?: number }; message?: string };
+    if (err.response?.status === 404) {
       console.log(`No transactions found for ${address} (${asset})`);
     } else {
-      console.error(`Error fetching transactions for ${address} (${asset}):`, error.message);
+      console.error(
+        `Error fetching transactions for ${address} (${asset}):`,
+        err.message || String(error)
+      );
     }
     return [];
   }
@@ -440,19 +460,27 @@ function analyzeTransactionFlow(
           }
         }
 
-        flow.transactions.push({
+        const feeOp = tx.transaction.operations.find((o) => o.type === "FEE");
+        const txData: {
+          blockHeight: number;
+          txHash: string;
+          type: "SEND" | "RECEIVE";
+          counterparty: string;
+          amount: string;
+          fee?: string;
+        } = {
           blockHeight,
           txHash,
           type: isReceive ? "RECEIVE" : "SEND",
           counterparty,
           amount: formatAmount(op.amount.value, config.decimals),
-          fee: tx.transaction.operations.find((o) => o.type === "FEE")?.amount?.value
-            ? formatAmount(
-                tx.transaction.operations.find((o) => o.type === "FEE")!.amount!.value,
-                config.decimals
-              )
-            : undefined,
-        });
+        };
+
+        if (feeOp?.amount?.value) {
+          txData.fee = formatAmount(feeOp.amount.value, config.decimals);
+        }
+
+        flow.transactions.push(txData);
 
         if (isReceive) {
           flow.totalReceived += amount;
@@ -488,8 +516,10 @@ async function main() {
   // Group addresses by asset for efficient processing
   const addressesByAsset = DEPOSIT_ADDRESSES.reduce(
     (acc, addr) => {
-      if (!acc[addr.asset]) acc[addr.asset] = [];
-      acc[addr.asset].push(addr);
+      if (!acc[addr.asset]) {
+        acc[addr.asset] = [];
+      }
+      acc[addr.asset]!.push(addr);
       return acc;
     },
     {} as Record<string, DepositAddress[]>
@@ -523,16 +553,18 @@ async function main() {
 
         summary.addressesWithTransactions++;
         summary.totalTransactions += flow.transactions.length;
-        summary.byAsset[asset].count += flow.transactions.length;
+
+        const assetStats = summary.byAsset[asset]!;
+        assetStats.count += flow.transactions.length;
 
         // Update asset totals
-        const currentReceived = BigInt(summary.byAsset[asset].totalReceived.replace(".", ""));
-        const currentSent = BigInt(summary.byAsset[asset].totalSent.replace(".", ""));
-        summary.byAsset[asset].totalReceived = formatAmount(
+        const currentReceived = BigInt(assetStats.totalReceived.replace(".", ""));
+        const currentSent = BigInt(assetStats.totalSent.replace(".", ""));
+        assetStats.totalReceived = formatAmount(
           (currentReceived + flow.totalReceived).toString(),
           config.decimals
         );
-        summary.byAsset[asset].totalSent = formatAmount(
+        assetStats.totalSent = formatAmount(
           (currentSent + flow.totalSent).toString(),
           config.decimals
         );
@@ -576,21 +608,26 @@ async function main() {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, -5);
   const outputFile = path.join(outputDir, `rosetta-flows-${timestamp}.json`);
 
-  fs.writeFileSync(
-    outputFile,
-    JSON.stringify(
-      {
-        metadata: {
-          timestamp: new Date().toISOString(),
-          addresses: DEPOSIT_ADDRESSES,
-        },
-        summary,
-        flows: results,
+  // Custom JSON serializer to handle BigInt values
+  const jsonOutput = JSON.stringify(
+    {
+      metadata: {
+        timestamp: new Date().toISOString(),
+        addresses: DEPOSIT_ADDRESSES,
       },
-      null,
-      2
-    )
+      summary,
+      flows: results.map((flow) => ({
+        ...flow,
+        totalReceived: flow.totalReceived.toString(),
+        totalSent: flow.totalSent.toString(),
+        netBalance: flow.netBalance.toString(),
+      })),
+    },
+    null,
+    2
   );
+
+  fs.writeFileSync(outputFile, jsonOutput);
 
   console.log(`\nDetailed results saved to: ${outputFile}`);
 
@@ -656,4 +693,5 @@ if (require.main === module) {
   });
 }
 
-export { searchTransactions, analyzeTransactionFlow, TransactionFlow };
+export { searchTransactions, analyzeTransactionFlow };
+export type { TransactionFlow };

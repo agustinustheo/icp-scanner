@@ -12,13 +12,13 @@ echo ""
 
 # Check if .env file exists
 if [ ! -f .env ]; then
-    echo "Creating .env file with default Rosetta endpoints..."
+    echo "Creating .env file with Rosetta endpoints..."
     cat > .env << EOF
-# Rosetta API Endpoints
+# Rosetta API Endpoints (all public)
 ICP_ROSETTA_URL=https://rosetta-api.internetcomputer.org
-CKBTC_ROSETTA_URL=https://icrc-rosetta-api.internetcomputer.org
-CKUSDC_ROSETTA_URL=https://icrc-rosetta-api.internetcomputer.org
-CKUSDT_ROSETTA_URL=https://icrc-rosetta-api.internetcomputer.org
+CKBTC_ROSETTA_URL=https://icrc-api.internetcomputer.org/api/v1
+CKUSDC_ROSETTA_URL=https://icrc-api.internetcomputer.org/api/v1
+CKUSDT_ROSETTA_URL=https://icrc-api.internetcomputer.org/api/v1
 
 # Optional: Add other configuration
 # MAX_TRANSACTIONS_PER_ADDRESS=100
