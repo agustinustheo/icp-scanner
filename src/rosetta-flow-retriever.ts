@@ -106,9 +106,7 @@ const ROSETTA_CONFIGS = {
 // Load deposit addresses from JSON file
 function loadDepositAddresses(filePath: string): DepositAddress[] {
   try {
-    const absolutePath = path.isAbsolute(filePath)
-      ? filePath
-      : path.join(process.cwd(), filePath);
+    const absolutePath = path.isAbsolute(filePath) ? filePath : path.join(process.cwd(), filePath);
 
     console.log(`Loading addresses from: ${absolutePath}`);
     const fileContent = fs.readFileSync(absolutePath, "utf-8");
@@ -615,17 +613,29 @@ async function main(addressesFilePath: string) {
 // Run the script
 if (require.main === module) {
   const args = process.argv.slice(2);
-  const addressesFile = args[0] || "addresses-new-custodian.json";
+  const addressesFile = args[0] || "addresses-new-vault-subaccounts.json";
 
   if (args.includes("--help") || args.includes("-h")) {
     console.log("Usage: tsx rosetta-flow-retriever.ts [addresses-file.json]");
     console.log("");
     console.log("Arguments:");
     console.log("  addresses-file.json   Path to JSON file with deposit addresses");
-    console.log("                        (default: addresses-new-custodian.json)");
+    console.log("                        (default: addresses-new-vault-subaccounts.json)");
+    console.log("");
+    console.log("Available address files:");
+    console.log(
+      "  addresses-new-vault-subaccounts.json  - 25 addresses (10 ICP, 2 ckUSDC, 4 ckBTC, 9 ckUSDT)"
+    );
+    console.log("  addresses-new-custodian.json          - 1 address (new custodian principal)");
+    console.log(
+      "  addresses-old-vault-subaccounts.json  - 44 addresses (36 ICP, 4 ckUSDC, 2 ckBTC, 2 ckUSDT)"
+    );
+    console.log("  addresses-old-custodian.json          - 1 address (old custodian for testing)");
     console.log("");
     console.log("Examples:");
+    console.log("  tsx rosetta-flow-retriever.ts addresses-new-vault-subaccounts.json");
     console.log("  tsx rosetta-flow-retriever.ts addresses-new-custodian.json");
+    console.log("  tsx rosetta-flow-retriever.ts addresses-old-vault-subaccounts.json");
     console.log("  tsx rosetta-flow-retriever.ts addresses-old-custodian.json");
     process.exit(0);
   }

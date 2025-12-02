@@ -22,13 +22,17 @@ if [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then
     echo ""
     echo "Arguments:"
     echo "  addresses-file.json   Path to JSON file with deposit addresses"
-    echo "                        (default: addresses-old-vault-subaccounts.json)"
+    echo "                        (default: addresses-new-vault-subaccounts.json)"
     echo ""
     echo "Available address files:"
+    echo "  addresses-new-vault-subaccounts.json  - 25 addresses (10 ICP, 2 ckUSDC, 4 ckBTC, 9 ckUSDT)"
+    echo "  addresses-new-custodian.json          - 1 address (new custodian address)"
     echo "  addresses-old-vault-subaccounts.json  - 44 addresses (36 ICP, 4 ckUSDC, 2 ckBTC, 2 ckUSDT)"
-    echo "  addresses-old-custodian.json  - 1 address (ICP only)"
+    echo "  addresses-old-custodian.json          - 1 address (old custodian address)"
     echo ""
     echo "Examples:"
+    echo "  ./run-rosetta-flow.sh addresses-new-vault-subaccounts.json"
+    echo "  ./run-rosetta-flow.sh addresses-new-custodian.json"
     echo "  ./run-rosetta-flow.sh addresses-old-vault-subaccounts.json"
     echo "  ./run-rosetta-flow.sh addresses-old-custodian.json"
     echo ""
@@ -36,7 +40,7 @@ if [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then
 fi
 
 # Set default addresses file if not provided
-ADDRESSES_FILE="${1:-addresses-old-vault-subaccounts.json}"
+ADDRESSES_FILE="${1:-addresses-new-vault-subaccounts.json}"
 
 echo "Using addresses file: $ADDRESSES_FILE"
 echo ""
