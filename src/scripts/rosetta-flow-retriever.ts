@@ -58,12 +58,21 @@ interface TransactionFlow {
     timestamp?: number;
     type: "SEND" | "RECEIVE";
     counterparty: string;
+    counterpartySubaccount?: string;
     amount: string;
     fee?: string;
   }>;
   totalReceived: bigint;
   totalSent: bigint;
   netBalance: bigint;
+  counterparties: Map<
+    string,
+    {
+      totalReceived: bigint;
+      totalSent: bigint;
+      transactionCount: number;
+    }
+  >;
 }
 
 // Configuration
@@ -96,7 +105,7 @@ const ROSETTA_CONFIGS = {
 
 // Parse deposit addresses
 const DEPOSIT_ADDRESSES: DepositAddress[] = [
-  // ICP addresses
+  // ICP addresses (36 total)
   {
     address: "313fbe9c45f1644076d3be1a2b83dc46238edb4a5b8185807d4e774f6cc409d8",
     asset: "ICP",
@@ -278,42 +287,50 @@ const DEPOSIT_ADDRESSES: DepositAddress[] = [
     originalAsset: "ICP",
   },
 
-  // ICRC token addresses with principal format
+  // CKUSDT addresses (2 total)
   {
     address: "g5nrt-myaaa-aaaap-qhluq-cai-yyuo52q.1e",
     asset: "CKUSDT",
-    originalAsset: "CKUSDT_ICP_2",
+    originalAsset: "CKUSDT_ICP",
   },
+  {
+    address: "g5nrt-myaaa-aaaap-qhluq-cai-bgjhw4y.28",
+    asset: "CKUSDT",
+    originalAsset: "CKUSDT_ICP",
+  },
+
+  // CKUSDC addresses (4 total)
   {
     address: "g5nrt-myaaa-aaaap-qhluq-cai-wex547a.1f",
     asset: "CKUSDC",
-    originalAsset: "CKUSDC_ICP_2",
+    originalAsset: "CKUSDC_ICP",
   },
   {
     address: "g5nrt-myaaa-aaaap-qhluq-cai-5fdze3i.22",
     asset: "CKUSDC",
-    originalAsset: "CKUSDC_ICP_2",
-  },
-  {
-    address: "g5nrt-myaaa-aaaap-qhluq-cai-tzakf6y.23",
-    asset: "CKBTC",
-    originalAsset: "CKBTC_ICP_2",
+    originalAsset: "CKUSDC_ICP",
   },
   {
     address: "g5nrt-myaaa-aaaap-qhluq-cai-aasdowa.24",
     asset: "CKUSDC",
-    originalAsset: "CKUSDC_ICP_2",
+    originalAsset: "CKUSDC_ICP",
   },
   {
     address: "g5nrt-myaaa-aaaap-qhluq-cai-5yvfm5a.26",
     asset: "CKUSDC",
     originalAsset: "CKUSDC_ICP",
   },
-  { address: "g5nrt-myaaa-aaaap-qhluq-cai-tewwnyq.27", asset: "CKBTC", originalAsset: "CKBTC_ICP" },
+
+  // CKBTC addresses (2 total)
   {
-    address: "g5nrt-myaaa-aaaap-qhluq-cai-bgjhw4y.28",
-    asset: "CKUSDT",
-    originalAsset: "CKUSDT_ICP",
+    address: "g5nrt-myaaa-aaaap-qhluq-cai-tzakf6y.23",
+    asset: "CKBTC",
+    originalAsset: "CKBTC_ICP",
+  },
+  {
+    address: "g5nrt-myaaa-aaaap-qhluq-cai-tewwnyq.27",
+    asset: "CKBTC",
+    originalAsset: "CKBTC_ICP",
   },
 ];
 
@@ -435,6 +452,7 @@ function analyzeTransactionFlow(
     totalReceived: BigInt(0),
     totalSent: BigInt(0),
     netBalance: BigInt(0),
+    counterparties: new Map(),
   };
 
   for (const tx of transactions) {
@@ -451,12 +469,30 @@ function analyzeTransactionFlow(
         const amount = BigInt(op.amount.value);
         const isReceive = amount > 0;
 
-        // Find counterparty
+        // Find counterparty and their subaccount
+        // Look for the OTHER TRANSFER operation that's not our address
         let counterparty = "unknown";
+        let counterpartySubaccount: string | undefined;
+
         for (const otherOp of tx.transaction.operations) {
-          if (otherOp.type === "TRANSFER" && otherOp.account.address !== op.account.address) {
-            counterparty = otherOp.account.address;
-            break;
+          // ICP uses "TRANSACTION" type, ICRC uses "TRANSFER" type
+          const isTransferOp = otherOp.type === "TRANSFER" || otherOp.type === "TRANSACTION";
+
+          if (
+            isTransferOp &&
+            otherOp.operation_identifier.index !== op.operation_identifier.index
+          ) {
+            const otherAddress = otherOp.account.address;
+            // Make sure this is actually a different address
+            if (
+              otherAddress !== parsedAddress.principal &&
+              otherAddress !== address &&
+              otherAddress !== op.account.address
+            ) {
+              counterparty = otherAddress;
+              counterpartySubaccount = otherOp.account.sub_account?.address;
+              break;
+            }
           }
         }
 
@@ -466,6 +502,7 @@ function analyzeTransactionFlow(
           txHash: string;
           type: "SEND" | "RECEIVE";
           counterparty: string;
+          counterpartySubaccount?: string;
           amount: string;
           fee?: string;
         } = {
@@ -476,11 +513,33 @@ function analyzeTransactionFlow(
           amount: formatAmount(op.amount.value, config.decimals),
         };
 
+        if (counterpartySubaccount) {
+          txData.counterpartySubaccount = counterpartySubaccount;
+        }
+
         if (feeOp?.amount?.value) {
           txData.fee = formatAmount(feeOp.amount.value, config.decimals);
         }
 
         flow.transactions.push(txData);
+
+        // Track counterparty statistics
+        if (counterparty !== "unknown") {
+          const cpStats = flow.counterparties.get(counterparty) || {
+            totalReceived: BigInt(0),
+            totalSent: BigInt(0),
+            transactionCount: 0,
+          };
+
+          if (isReceive) {
+            cpStats.totalReceived += amount;
+          } else {
+            cpStats.totalSent += amount < 0 ? -amount : amount;
+          }
+          cpStats.transactionCount += 1;
+
+          flow.counterparties.set(counterparty, cpStats);
+        }
 
         if (isReceive) {
           flow.totalReceived += amount;
@@ -608,7 +667,7 @@ async function main() {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, -5);
   const outputFile = path.join(outputDir, `rosetta-flows-${timestamp}.json`);
 
-  // Custom JSON serializer to handle BigInt values
+  // Custom JSON serializer to handle BigInt values and Maps
   const jsonOutput = JSON.stringify(
     {
       metadata: {
@@ -621,6 +680,12 @@ async function main() {
         totalReceived: flow.totalReceived.toString(),
         totalSent: flow.totalSent.toString(),
         netBalance: flow.netBalance.toString(),
+        counterparties: Array.from(flow.counterparties.entries()).map(([address, stats]) => ({
+          address,
+          totalReceived: stats.totalReceived.toString(),
+          totalSent: stats.totalSent.toString(),
+          transactionCount: stats.transactionCount,
+        })),
       })),
     },
     null,
@@ -633,16 +698,32 @@ async function main() {
 
   // Generate CSV report
   const csvFile = path.join(outputDir, `rosetta-flows-${timestamp}.csv`);
-  const csvHeader = "Address,Asset,Type,BlockHeight,TxHash,Counterparty,Amount,Fee\n";
+  const csvHeader =
+    "Address,Asset,Type,BlockHeight,TxHash,Counterparty,CounterpartySubaccount,Amount,Fee\n";
   const csvRows = results.flatMap((flow) =>
     flow.transactions.map(
       (tx) =>
-        `${flow.address},${flow.asset},${tx.type},${tx.blockHeight},${tx.txHash},${tx.counterparty},${tx.amount},${tx.fee || ""}`
+        `${flow.address},${flow.asset},${tx.type},${tx.blockHeight},${tx.txHash},${tx.counterparty},${tx.counterpartySubaccount || ""},${tx.amount},${tx.fee || ""}`
     )
   );
 
   fs.writeFileSync(csvFile, csvHeader + csvRows.join("\n"));
   console.log(`CSV report saved to: ${csvFile}`);
+
+  // Generate Counterparty Summary CSV
+  const counterpartyFile = path.join(outputDir, `rosetta-counterparties-${timestamp}.csv`);
+  const counterpartyHeader =
+    "DepositAddress,Asset,CounterpartyAddress,TotalReceived,TotalSent,NetFlow,TransactionCount\n";
+  const counterpartyRows = results.flatMap((flow) => {
+    const config = ROSETTA_CONFIGS[flow.asset as keyof typeof ROSETTA_CONFIGS];
+    return Array.from(flow.counterparties.entries()).map(([cpAddress, stats]) => {
+      const netFlow = stats.totalReceived - stats.totalSent;
+      return `${flow.address},${flow.asset},${cpAddress},${formatAmount(stats.totalReceived.toString(), config.decimals)},${formatAmount(stats.totalSent.toString(), config.decimals)},${formatAmount(netFlow.toString(), config.decimals)},${stats.transactionCount}`;
+    });
+  });
+
+  fs.writeFileSync(counterpartyFile, counterpartyHeader + counterpartyRows.join("\n"));
+  console.log(`Counterparty analysis saved to: ${counterpartyFile}`);
 
   // Generate transaction flow visualization
   console.log("\n" + "=".repeat(80));
@@ -678,6 +759,57 @@ async function main() {
         );
       }
     }
+  }
+
+  // Show top counterparties by transaction volume
+  console.log("\n" + "=".repeat(80));
+  console.log("TOP COUNTERPARTIES BY VOLUME");
+  console.log("=".repeat(80));
+
+  // Collect all unique counterparties across all flows
+  const globalCounterparties = new Map<
+    string,
+    {
+      addresses: Set<string>;
+      totalVolume: bigint;
+      transactionCount: number;
+      assets: Set<string>;
+    }
+  >();
+
+  for (const flow of results) {
+    const counterpartyEntries = Array.from(flow.counterparties.entries());
+    for (const [cpAddress, stats] of counterpartyEntries) {
+      const existing = globalCounterparties.get(cpAddress) || {
+        addresses: new Set<string>(),
+        totalVolume: BigInt(0),
+        transactionCount: 0,
+        assets: new Set<string>(),
+      };
+
+      existing.addresses.add(flow.address);
+      existing.totalVolume += stats.totalReceived + stats.totalSent;
+      existing.transactionCount += stats.transactionCount;
+      existing.assets.add(flow.asset);
+
+      globalCounterparties.set(cpAddress, existing);
+    }
+  }
+
+  // Sort by total volume and show top 10
+  const topCounterparties = Array.from(globalCounterparties.entries())
+    .sort((a, b) => {
+      const volA = a[1].totalVolume;
+      const volB = b[1].totalVolume;
+      return volA > volB ? -1 : volA < volB ? 1 : 0;
+    })
+    .slice(0, 10);
+
+  for (const [cpAddress, stats] of topCounterparties) {
+    console.log(`\n${cpAddress.substring(0, 50)}${cpAddress.length > 50 ? "..." : ""}`);
+    console.log(`  Interacted with ${stats.addresses.size} deposit address(es)`);
+    console.log(`  Total transactions: ${stats.transactionCount}`);
+    console.log(`  Assets involved: ${Array.from(stats.assets).join(", ")}`);
   }
 
   console.log("\n" + "=".repeat(80));
