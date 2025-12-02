@@ -103,236 +103,28 @@ const ROSETTA_CONFIGS = {
   },
 };
 
-// Parse deposit addresses
-const DEPOSIT_ADDRESSES: DepositAddress[] = [
-  // ICP addresses (36 total)
-  {
-    address: "313fbe9c45f1644076d3be1a2b83dc46238edb4a5b8185807d4e774f6cc409d8",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "bfe0d99601c21aa1446c0351c4ae2c93e58612766b110a2c9c721a2529d392e6",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "27a1c92afd3e434a45b6e0389878ff550f6ec4113294af000581ee31da8ee8bd",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "213a2329282ec742684af76dfa9219ce3e76696bc58a685848036a1f95c483a3",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "03d5313b595283a03e796a1cb552a66a3b664b50c9b8f41c4ee9e92694d8f7df",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "8213138d185465036ef26b68aefef367abc8aa98358b6f4529290685dc29b054",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "51587e7c204274e97cb99354fbe90ad4fc7095d6265aaf0e67baf2891720beba",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "fa7c17b564f81a23e93e0ff7050afc5712071489e72a8dd9a826cf776ec9f727",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "7468b4401470a7d70286cb7b846aa4cf2e9d60fc0f34b15040b62f748c6c295e",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "2bb79745f2508149bc2b5223c493390ea0b676d77418e72097ab0ba3489be007",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "4d40732a10a86db16f047f85344a0a2c3ab7f29e58e3274ce185760a4e287a11",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "94d96d856258ccdf7caa405d854cc43516846bee7a9945c6a22572c05f395122",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "efbf1c300e931cccb86a7692a8304cc1c10b7cc9101ceddddf0c37fe2d8955bd",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "0213b16c7b9690f00870f3743655a31da24e90d63e91f7acbb462f7dd72efde4",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "b5cab95cb7175b68c61927dda853bc73c6904c0a636267a6ca94f5574df77b93",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "782d9e39859edbb706d6bc67e05a89183f3f810f0f867865f5d259656ebe2382",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "76dabaa0623d610a52beb0f7eb83b49cab6385f9be1e56f6499028a3804464e7",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "0a5920b6f942388885e83a4526150a996bcd59aa45ab7b42c93a527763e4c8ab",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "0cbcfb369235915c22b097b2971cb2baaac8505bbaa850dbfd010429b4e345a2",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "73bc1a9270533e97a4c26af5c4d914d144b11653719e2b11032ae885a87bc4de",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "1da4b1a9bcd903cf4d976eba66c5c2e964d26614f05782567cd42b6d49c8d84c",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "c93554f9fdc70b9157cb3669840f0195ea0b3c9a03fb3c4c9f91067575d6534b",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "aae540f33a31079b6d1390d1d341459c6831f2494b4710bf8142b1c3f684df77",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "9e9530875d810a1ecc82ed9300f688dfe7acc021db49ebc8e2a0a39f9da7b2c3",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "4e5747ce8681ab72e17adfa9143bc041626e34f24a499f415efd9565226637d6",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "b97e5e72a4ba885e3e3c09ea765ab6a991ab04f9034a67fd1e846ea18fb09634",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "204eaf5049b46bcf5b273695a219acce4c8f4c17d75c7f5401bc4422ebe782d7",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "64415e195a880e1933aa18447675fcc97e75bf126978dc8e2b8c9f729b95dd55",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "751f76f9b5b86883d59d60851064e5a28b42dc8a4825166b1523681b99176f58",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "e060a06f984c91b3d75ecdfc73d99ad473a603bbffbb6a1d57690962f3472282",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "8585fdac56c2733021c57ae9cab6fb57bd67edc6ceb75dc3f75116e8031bc1f5",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "536142247b3b739f3d0e29366417cdcb8821a8528585f3db85ded6de687ebe1f",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "20d08ba18445b6f7e97029f87ff99c606737bba48b748d0a673c2e0aea687fca",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "d50b0aa8b3c504083fe6ebd33588d3e2b9abf5b3f0eb1a3a138616356c671de5",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "7dfe9c41b6b92f871ce4cddfecb01afd09908f48407af0f7cfe52731f672b8dc",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
-  {
-    address: "1982b36efb63c463d0a64160f939acc151dbdbeb4032febdfa57992d619a5a7f",
-    asset: "ICP",
-    originalAsset: "ICP",
-  },
+// Load deposit addresses from JSON file
+function loadDepositAddresses(filePath: string): DepositAddress[] {
+  try {
+    const absolutePath = path.isAbsolute(filePath)
+      ? filePath
+      : path.join(process.cwd(), filePath);
 
-  // CKUSDT addresses (2 total)
-  {
-    address: "g5nrt-myaaa-aaaap-qhluq-cai-yyuo52q.1e",
-    asset: "CKUSDT",
-    originalAsset: "CKUSDT_ICP",
-  },
-  {
-    address: "g5nrt-myaaa-aaaap-qhluq-cai-bgjhw4y.28",
-    asset: "CKUSDT",
-    originalAsset: "CKUSDT_ICP",
-  },
+    console.log(`Loading addresses from: ${absolutePath}`);
+    const fileContent = fs.readFileSync(absolutePath, "utf-8");
+    const addresses = JSON.parse(fileContent) as DepositAddress[];
 
-  // CKUSDC addresses (4 total)
-  {
-    address: "g5nrt-myaaa-aaaap-qhluq-cai-wex547a.1f",
-    asset: "CKUSDC",
-    originalAsset: "CKUSDC_ICP",
-  },
-  {
-    address: "g5nrt-myaaa-aaaap-qhluq-cai-5fdze3i.22",
-    asset: "CKUSDC",
-    originalAsset: "CKUSDC_ICP",
-  },
-  {
-    address: "g5nrt-myaaa-aaaap-qhluq-cai-aasdowa.24",
-    asset: "CKUSDC",
-    originalAsset: "CKUSDC_ICP",
-  },
-  {
-    address: "g5nrt-myaaa-aaaap-qhluq-cai-5yvfm5a.26",
-    asset: "CKUSDC",
-    originalAsset: "CKUSDC_ICP",
-  },
+    if (!Array.isArray(addresses)) {
+      throw new Error("Addresses file must contain an array");
+    }
 
-  // CKBTC addresses (2 total)
-  {
-    address: "g5nrt-myaaa-aaaap-qhluq-cai-tzakf6y.23",
-    asset: "CKBTC",
-    originalAsset: "CKBTC_ICP",
-  },
-  {
-    address: "g5nrt-myaaa-aaaap-qhluq-cai-tewwnyq.27",
-    asset: "CKBTC",
-    originalAsset: "CKBTC_ICP",
-  },
-];
+    return addresses;
+  } catch (error: unknown) {
+    const err = error as { message?: string };
+    console.error(`Error loading addresses file: ${err.message || String(error)}`);
+    process.exit(1);
+  }
+}
 
 // Utility functions
 function parseAddress(address: string): { principal: string; subaccount?: string } {
@@ -556,7 +348,10 @@ function analyzeTransactionFlow(
 }
 
 // Main function
-async function main() {
+async function main(addressesFilePath: string) {
+  // Load deposit addresses from JSON file
+  const DEPOSIT_ADDRESSES = loadDepositAddresses(addressesFilePath);
+
   console.log("=".repeat(80));
   console.log("ROSETTA TRANSACTION FLOW RETRIEVER");
   console.log("=".repeat(80));
@@ -819,7 +614,23 @@ async function main() {
 
 // Run the script
 if (require.main === module) {
-  main().catch((error) => {
+  const args = process.argv.slice(2);
+  const addressesFile = args[0] || "addresses-new-custodian.json";
+
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log("Usage: tsx rosetta-flow-retriever.ts [addresses-file.json]");
+    console.log("");
+    console.log("Arguments:");
+    console.log("  addresses-file.json   Path to JSON file with deposit addresses");
+    console.log("                        (default: addresses-new-custodian.json)");
+    console.log("");
+    console.log("Examples:");
+    console.log("  tsx rosetta-flow-retriever.ts addresses-new-custodian.json");
+    console.log("  tsx rosetta-flow-retriever.ts addresses-old-custodian.json");
+    process.exit(0);
+  }
+
+  main(addressesFile).catch((error) => {
     console.error("Fatal error:", error);
     process.exit(1);
   });
