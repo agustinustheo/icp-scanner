@@ -9,6 +9,8 @@
     "dev": "ts-node scanner.ts",
     "verify": "ts-node verify.ts",
     "scan": "./run.sh",
+    "rosetta-flow": "tsx src/scripts/rosetta-flow-retriever.ts",
+    "flow": "./scripts/run-rosetta-flow.sh",
     "lint": "eslint . --ext .ts",
     "lint:fix": "eslint . --ext .ts --fix",
     "format": "prettier --write \"**/*.{ts,json,md}\"",
@@ -33,7 +35,10 @@
     "@dfinity/agent": "^3.2.6",
     "@dfinity/candid": "^3.2.6",
     "@dfinity/ledger-icrc": "^4.0.1",
-    "@dfinity/principal": "^3.2.6"
+    "@dfinity/principal": "^3.2.6",
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.1",
+    "tsx": "^4.7.0"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
