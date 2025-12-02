@@ -1,6 +1,6 @@
-# ICP Transaction Scanner
+# ICP Transaction Scanner & Flow Analyzer
 
-A unified TypeScript scanner for tracking ICP blockchain transactions across multiple assets:
+A comprehensive TypeScript toolkit for tracking and analyzing ICP blockchain transactions across multiple assets:
 
 - ICP (native token)
 - ckBTC (chain-key Bitcoin)
@@ -8,6 +8,8 @@ A unified TypeScript scanner for tracking ICP blockchain transactions across mul
 - ckUSDT (chain-key Tether)
 
 ## Features
+
+### Transaction Scanner
 
 - Unified scanner for both ICP native ledger and ICRC-3 tokens
 - Scans historical transactions with full archive support
@@ -17,6 +19,15 @@ A unified TypeScript scanner for tracking ICP blockchain transactions across mul
 - Configurable date window for filtering transactions (default: June 1, 2025 to now)
 - Supports both principal and legacy account ID matching
 - Safe environment variable handling with sensible defaults
+
+### Rosetta Flow Retriever
+
+- Query transaction flows using the Rosetta API
+- Analyze multiple deposit addresses in batch
+- Generate detailed transaction reports (JSON and CSV)
+- **Counterparty Tracking**: Identify and analyze all addresses that interact with your accounts
+- Aggregate transaction statistics by counterparty
+- Support for ICP and ICRC tokens (ckBTC, ckUSDC, ckUSDT)
 
 ## Prerequisites
 
@@ -129,6 +140,207 @@ pnpm build
 # Run all checks (lint, format, build)
 pnpm check
 ```
+
+## Rosetta Flow Retriever
+
+The Rosetta Flow Retriever is a specialized tool for querying transaction flows using the Rosetta API with advanced counterparty tracking capabilities.
+
+### Quick Start
+
+```bash
+# Run with default address file (new vault subaccounts)
+pnpm flow
+
+# Run with specific address files
+pnpm flow:new-vault      # New vault subaccounts (25 addresses)
+pnpm flow:new-custodian  # New custodian principal (1 address)
+pnpm flow:old-vault      # Old vault subaccounts (44 addresses)
+pnpm flow:old-custodian  # Old custodian address (1 address)
+
+# Run all address files in sequence
+pnpm flow:all
+
+# Or use the shell script directly
+./scripts/run-rosetta-flow.sh [address-file.json]
+```
+
+### Address Files Configuration
+
+The Rosetta Flow Retriever supports multiple address files through JSON configuration:
+
+#### Available Address Files
+
+- **`addresses-new-vault-subaccounts.json`**: 25 deposit addresses from the new vault
+- **`addresses-new-custodian.json`**: 1 new custodian principal address
+- **`addresses-old-vault-subaccounts.json`**: 44 deposit addresses from the old vault
+- **`addresses-old-custodian.json`**: 1 old custodian address
+
+#### Creating Custom Address Files
+
+Create your own address file with this format:
+
+```json
+[
+  {
+    "address": "313fbe9c45f1644076d3be1a2b83dc46...",
+    "asset": "ICP",
+    "originalAsset": "ICP"
+  },
+  {
+    "address": "g5nrt-myaaa-aaaap-qhluq-cai-yyuo52q.1e",
+    "asset": "CKUSDT",
+    "originalAsset": "CKUSDT_ICP"
+  }
+]
+```
+
+### Counterparty Tracking
+
+The Rosetta Flow Retriever includes comprehensive counterparty tracking that identifies and analyzes all addresses interacting with your accounts.
+
+#### Output Files
+
+The script generates three output files:
+
+1. **`rosetta-flows-{timestamp}.json`**: Complete transaction data with embedded counterparty information
+2. **`rosetta-flows-{timestamp}.csv`**: Detailed transaction-by-transaction breakdown
+3. **`rosetta-counterparties-{timestamp}.csv`**: Aggregated statistics for each counterparty
+
+#### Counterparty Analysis CSV Format
+
+```csv
+DepositAddress,Asset,CounterpartyAddress,TotalReceived,TotalSent,NetFlow,TransactionCount
+313fbe9c...,ICP,def456...,500.25,200.10,300.15,12
+```
+
+#### Using Counterparty Data
+
+```bash
+# Find top senders
+sort -t, -k4 -rn rosetta-counterparties-*.csv | head -20
+
+# Find top recipients
+sort -t, -k5 -rn rosetta-counterparties-*.csv | head -20
+
+# Find most frequent trading partners
+sort -t, -k7 -rn rosetta-counterparties-*.csv | head -20
+```
+
+#### Advanced Counterparty Analysis
+
+**Import into Spreadsheet:**
+
+- Excel, Google Sheets, or other tools for pivot tables and charts
+- Custom filtering and sorting
+- Financial reconciliation
+
+**Query with SQL:**
+
+```bash
+# Install csvkit
+pip install csvkit
+
+# Convert to SQLite database
+csvsql --db sqlite:///flows.db --insert rosetta-counterparties-*.csv
+
+# Query with SQL
+sqlite3 flows.db "SELECT CounterpartyAddress, SUM(TransactionCount) as Total
+                  FROM flows GROUP BY CounterpartyAddress
+                  ORDER BY Total DESC LIMIT 10"
+```
+
+**Python Analysis:**
+
+```python
+import pandas as pd
+
+# Load counterparty data
+df = pd.read_csv('rosetta-counterparties-*.csv')
+
+# Get top 10 counterparties by net flow
+top_counterparties = df.groupby('CounterpartyAddress')['NetFlow'].sum().sort_values(ascending=False).head(10)
+
+# Get most active counterparties
+most_active = df.groupby('CounterpartyAddress')['TransactionCount'].sum().sort_values(ascending=False).head(10)
+```
+
+#### Understanding Counterparties
+
+**For Received Transactions (Type: RECEIVE):**
+
+- **Counterparty** = The sender who sent tokens to your deposit address
+- **Amount** = Positive value (what you received)
+
+**For Sent Transactions (Type: SEND):**
+
+- **Counterparty** = The recipient who received tokens from your deposit address
+- **Amount** = Negative value (what you sent)
+
+### Address File Usage
+
+The Rosetta Flow Retriever supports running with different address file sets:
+
+```bash
+# Using pnpm scripts (recommended)
+pnpm flow                    # Uses new vault by default
+pnpm flow:new-vault          # New vault subaccounts
+pnpm flow:new-custodian      # New custodian principal
+pnpm flow:old-vault          # Old vault subaccounts
+pnpm flow:old-custodian      # Old custodian address
+pnpm flow:all                # Run all address files in sequence
+
+# Using the shell script directly
+./scripts/run-rosetta-flow.sh addresses-new-vault-subaccounts.json
+./scripts/run-rosetta-flow.sh addresses-new-custodian.json
+./scripts/run-rosetta-flow.sh addresses-old-vault-subaccounts.json
+./scripts/run-rosetta-flow.sh addresses-old-custodian.json
+
+# Show help
+./scripts/run-rosetta-flow.sh --help
+
+# Using tsx directly
+npx tsx src/scripts/rosetta-flow-retriever.ts addresses-custom.json
+```
+
+**Address File Fields:**
+
+- **address**: The actual blockchain address (hex for ICP, principal.subaccount for ICRC)
+- **asset**: The token type (`ICP`, `CKBTC`, `CKUSDC`, `CKUSDT`)
+- **originalAsset**: The original asset name from your system (used for tracking/reference)
+
+**Supported Address Formats:**
+
+1. **Account IDs** (64-character hex): `313fbe9c45f1644076d3be1a2b83dc46...`
+2. **Principal IDs**: `qvn3w-rqaaa-aaaam-qd4kq-cai`
+3. **Principal + Subaccount**: `g5nrt-myaaa-aaaap-qhluq-cai-yyuo52q.1e`
+
+### API Endpoints
+
+The Rosetta Flow Retriever uses public endpoints by default:
+
+- **ICP**: `https://rosetta-api.internetcomputer.org`
+- **ICRC Tokens**: `https://icrc-api.internetcomputer.org/api/v1`
+
+No configuration required - all endpoints are publicly accessible!
+
+#### What Changed (Public API Update)
+
+The project now uses the **public ICRC Rosetta API** endpoint, eliminating the need for self-hosted ICRC Rosetta instances.
+
+**Before:**
+
+- ❌ ICRC tokens (ckBTC, ckUSDC, ckUSDT) required self-hosted Rosetta instances
+- ❌ Users had to run Docker containers or build from source
+- ❌ Empty endpoint URLs caused ICRC queries to be skipped by default
+
+**After:**
+
+- ✅ Public ICRC Rosetta API endpoint available
+- ✅ All ICRC tokens work out of the box with no additional setup
+- ✅ Script now queries ICP and all ICRC tokens by default
+
+**Self-Hosted Alternative:**
+If you still want to run your own ICRC Rosetta instance (for performance, privacy, or offline usage), you can override the default URLs in your `.env` file. See [ICRC_ROSETTA_SETUP.md](docs/ICRC_ROSETTA_SETUP.md) for instructions.
 
 ## Output
 
