@@ -6,9 +6,9 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/scanner.js",
-    "dev": "ts-node scanner.ts",
-    "verify": "ts-node verify.ts",
-    "scan": "./run.sh",
+    "dev": "ts-node src/scanner.ts",
+    "verify": "ts-node src/verify.ts",
+    "scan": "./scripts/run.sh",
     "flow": "./scripts/run-rosetta-flow.sh",
     "flow:all": "pnpm flow:new-vault && pnpm flow:new-custodian && pnpm flow:old-vault && pnpm flow:old-custodian",
     "flow:new-vault": "./scripts/run-rosetta-flow.sh addresses-new-vault-subaccounts.json",

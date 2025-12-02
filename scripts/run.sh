@@ -5,7 +5,7 @@ echo ""
 
 # Compile
 echo "🔧 Compiling TypeScript..."
-pnpm tsc scanner.ts --noEmit false --outDir dist --target ES2020 --module commonjs
+pnpm tsc src/scanner.ts --noEmit false --outDir dist --target ES2020 --module commonjs
 
 if [ $? -ne 0 ]; then
     echo "❌ Compilation failed"

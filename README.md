@@ -1,6 +1,6 @@
 # ICP Transaction Scanner & Flow Analyzer
 
-A comprehensive TypeScript toolkit for tracking and analyzing ICP blockchain transactions across multiple assets:
+A TypeScript toolkit for tracking and analyzing ICP blockchain transactions across multiple assets:
 
 - ICP (native token)
 - ckBTC (chain-key Bitcoin)
@@ -196,7 +196,7 @@ Create your own address file with this format:
 
 ### Counterparty Tracking
 
-The Rosetta Flow Retriever includes comprehensive counterparty tracking that identifies and analyzes all addresses interacting with your accounts.
+The Rosetta Flow Retriever includes counterparty tracking that identifies and analyzes all addresses interacting with your accounts.
 
 #### Output Files
 
@@ -299,7 +299,7 @@ pnpm flow:all                # Run all address files in sequence
 ./scripts/run-rosetta-flow.sh --help
 
 # Using tsx directly
-npx tsx src/scripts/rosetta-flow-retriever.ts addresses-custom.json
+npx tsx src/rosetta-flow-retriever.ts addresses-custom.json
 ```
 
 **Address File Fields:**
@@ -390,7 +390,7 @@ date_iso,token,direction,amount,from_principal,from_subaccount,to_principal,to_s
 
 ## Technical Details
 
-The scanner implements multiple APIs for comprehensive transaction tracking:
+The scanner implements multiple APIs for transaction tracking:
 
 - **ICP Native Token**: Uses Rosetta API as primary method with Dashboard API fallback
 - **ICRC Tokens**: Uses ICRC-3 block log standard for ckBTC, ckUSDC, and ckUSDT
@@ -472,7 +472,7 @@ sequenceDiagram
 
 ### Multi-API Support
 
-The scanner implements a robust fallback system to ensure maximum compatibility:
+The scanner implements a fallback system to ensure maximum compatibility:
 
 - Rosetta API: Industry-standard blockchain API used by many exchanges
 - Dashboard APIs: ICP-specific APIs with different response formats
@@ -496,7 +496,7 @@ This scanner provides a unified interface for tracking token flows across the IC
 - **Performance**: Efficient parallel fetching and streaming CSV writes
 - **Reliability**: Multiple API fallbacks ensure maximum uptime
 
-The scanner automatically handles API differences, archive redirects, and various response formats to provide a seamless experience for tracking your ICP ecosystem transactions.
+The scanner automatically handles API differences, archive redirects, and various response formats for tracking your ICP ecosystem transactions.
 
 ## Transaction Flow Analysis
 
@@ -583,3 +583,11 @@ flowchart LR
 - `g5nrt-myaaa-aaaap-qhluq-cai-bgjhw4y.40`: **+0.1 ckUSDT**
 - `uiz2m-baaaa-aaaal-qjbxq-cai-vsrbnta.103`: **+0.85 ckUSDT**
 - `uiz2m-baaaa-aaaal-qjbxq-cai-vph5fvi.99`: **+1 ckUSDT**
+
+## Additional Documentation
+
+For more details, see these documentation files:
+
+- **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)**: Developer reference with technical details, codebase architecture, API implementation, and troubleshooting
+- **[docs/ICRC_ROSETTA_SETUP.md](docs/ICRC_ROSETTA_SETUP.md)**: Instructions for self-hosting ICRC Rosetta instances (optional - public endpoints work by default)
+- **[docs/HOLDINGS.md](docs/HOLDINGS.md)**: Portfolio analysis with wallet balances, transaction flows, and account strategies

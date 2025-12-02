@@ -64,8 +64,7 @@ icp-flows/
 ├── src/
 │   ├── scanner.ts                 # Main transaction scanner (1,298 lines)
 │   ├── verify.ts                  # Balance verification tool (290 lines)
-│   └── scripts/
-│       └── rosetta-flow-retriever.ts  # Rosetta API flow retriever
+│   └── rosetta-flow-retriever.ts  # Rosetta API flow retriever
 ├── scripts/
 │   ├── run.sh                     # Build and execution wrapper
 │   └── run-rosetta-flow.sh        # Rosetta flow wrapper
