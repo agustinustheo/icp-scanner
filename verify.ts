@@ -58,6 +58,13 @@ const ICP_ACCOUNTS: string[] = [
   "e71fb5d09ec4082185c469d95ea1628e1fd5a6b3302cc7ed001df577995e9297", // 0.128400 ICP
   "ac801181c724872270475e1ab0d74fda7b60cc0163534f95512cc3a4f9a0880d", // 0.091200 ICP
   "8585fdac56c2733021c57ae9cab6fb57bd67edc6ceb75dc3f75116e8031bc1f5", // 0.051100 ICP
+  // DFX Identity Account IDs (canister management wallets)
+  "4ef6b55f55a4bbeb4646b4e433da030662f4d0c097c5b158bf64ec44dfaeda53", // STAGING_DEPLOYER
+  "1c7a48ba6a562aa9eaa2481a9049cdf0433b9738c992d698c31d8abf89cadc79", // anonymous
+  "d4714355e1d49d9a30c870ecfe688117c5c572df0324db32fe8edc9ae5a166a3", // custodian
+  "9e33c8e1f40d608f28a90e3b42e0981b45f60d2556cd53db0abaebb63b23ca04", // default (same as existing)
+  "e90143878eaec7eb0e010f8ef2b4e275f87126c89c3d65409e31e2a5003e45cb", // mainnet_custodian
+  "385a55c2ce11e653a6b2a57977ccd2e8ac2c213322c33b108f5454038673f92a", // testnet_custodian (same as existing)
 ];
 
 // ICRC = Dashboard-style “principal[-tag].suffix” (or just “principal”)
